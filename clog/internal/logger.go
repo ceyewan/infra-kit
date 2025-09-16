@@ -1,7 +1,6 @@
 package internal
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,37 +11,51 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-// ExitFunc allows mocking os.Exit in tests
+// ExitFunc 退出函数类型，用于测试时模拟 os.Exit 行为
 var ExitFunc = os.Exit
 
-// SetExitFunc sets the exit function for testing
+// SetExitFunc 设置退出函数，用于测试时替换默认的 os.Exit
 func SetExitFunc(fn func(int)) {
 	ExitFunc = fn
 }
 
-// Hook 定义 context 钩子函数类型
-type Hook func(context.Context) (string, bool)
-
-// Logger 定义日志接口
+// Logger 定义统一的日志记录接口
+// 封装 zap.Logger 提供类型安全的使用方式和命名空间支持
 type Logger interface {
+	// Debug 记录调试级别的日志
 	Debug(msg string, fields ...zap.Field)
+
+	// Info 记录信息级别的日志
 	Info(msg string, fields ...zap.Field)
+
+	// Warn 记录警告级别的日志
 	Warn(msg string, fields ...zap.Field)
+
+	// Error 记录错误级别的日志
 	Error(msg string, fields ...zap.Field)
+
+	// Fatal 记录致命错误级别的日志并退出程序
 	Fatal(msg string, fields ...zap.Field)
 
+	// With 创建带有额外字段的子日志器
 	With(fields ...zap.Field) Logger
+
+	// WithOptions 创建带有选项的子日志器
 	WithOptions(opts ...zap.Option) Logger
+
+	// Namespace 创建带有层次化命名空间的子日志器
 	Namespace(name string) Logger
 }
 
-// zapLogger 封装 zap.Logger
+// zapLogger 封装 zap.Logger 的具体实现
+// 添加命名空间支持和优化的字段管理
 type zapLogger struct {
-	*zap.Logger
-	namespace string
+	*zap.Logger        // 底层的 zap.Logger 实例
+	namespace   string // 层次化命名空间路径，如 "service.module.component"
 }
 
-// addNamespaceToFields 动态添加 namespace 字段到日志字段中
+// addNamespaceToFields 动态添加命名空间字段到日志字段中
+// 将命名空间字段作为第一个字段，确保日志结构的一致性
 func (l *zapLogger) addNamespaceToFields(fields []zap.Field) []zap.Field {
 	if l.namespace == "" {
 		return fields
@@ -57,30 +70,47 @@ func (l *zapLogger) addNamespaceToFields(fields []zap.Field) []zap.Field {
 }
 
 // WithNamespaceField 创建命名空间字段（用于内部实现）
+// 确保命名空间字段的一致性和类型安全
 func WithNamespaceField(name string) zap.Field {
 	return zap.String("namespace", name)
 }
 
 // rotationConfig 日志轮转配置
+// 基于 lumberjack 库的配置结构
 type rotationConfig struct {
-	MaxSize    int
-	MaxBackups int
-	MaxAge     int
-	Compress   bool
+	MaxSize    int  // 单个日志文件最大大小（MB）
+	MaxBackups int  // 保留的备份文件数量
+	MaxAge     int  // 日志文件最大保留天数
+	Compress   bool // 是否压缩备份文件
 }
 
 // config 内部配置结构，避免循环依赖
+// 通过反射从外部 Config 结构体解析而来
 type config struct {
-	Level       string
-	Format      string
-	Output      string
-	AddSource   bool
-	EnableColor bool
-	RootPath    string
-	Rotation    *rotationConfig
+	Level       string          // 日志级别
+	Format      string          // 输出格式
+	Output      string          // 输出目标
+	AddSource   bool            // 是否包含源码信息
+	EnableColor bool            // 是否启用颜色
+	RootPath    string          // 项目根路径
+	Rotation    *rotationConfig // 日志轮转配置
 }
 
-// NewLogger 创建新的 logger
+// NewLogger 创建新的日志器实例
+// 根据配置创建 zap.Logger 并封装为 clog.Logger 接口
+//
+// 参数：
+//   - cfg: 配置对象，可以是 *clog.Config 或兼容的结构体
+//   - namespace: 层次化命名空间路径
+//
+// 返回：
+//   - Logger: 封装后的日志器实例
+//   - error: 创建失败时的错误
+//
+// 功能特性：
+//   - 支持文件输出和日志轮转
+//   - 自动创建输出目录
+//   - 优化性能的配置设置
 func NewLogger(cfg interface{}, namespace string) (Logger, error) {
 	// 类型断言获取配置
 	config := parseConfig(cfg)
@@ -128,13 +158,17 @@ func NewLogger(cfg interface{}, namespace string) (Logger, error) {
 	}, nil
 }
 
-// NewFallbackLogger 创建备用 logger
+// NewFallbackLogger 创建备用日志器
+// 在初始化失败时提供基本的日志功能，确保系统可用性
+// 使用 zap.NewProduction 创建生产环境配置的日志器
 func NewFallbackLogger() Logger {
 	logger, _ := zap.NewProduction()
 	return &zapLogger{Logger: logger}
 }
 
 // With 添加字段
+// With 创建带有额外字段的子日志器
+// 自动过滤掉 namespace 字段以避免重复
 func (l *zapLogger) With(fields ...zap.Field) Logger {
 	// 过滤掉 namespace 字段，避免重复
 	var filteredFields []zap.Field
@@ -150,7 +184,8 @@ func (l *zapLogger) With(fields ...zap.Field) Logger {
 	}
 }
 
-// WithOptions 添加选项
+// WithOptions 创建带有 zap 选项的子日志器
+// 保留原有的命名空间配置
 func (l *zapLogger) WithOptions(opts ...zap.Option) Logger {
 	// 应用选项，不再自动添加 namespace 字段
 	newLogger := l.Logger.WithOptions(opts...)
@@ -162,6 +197,7 @@ func (l *zapLogger) WithOptions(opts ...zap.Option) Logger {
 }
 
 // Debug 记录 Debug 级别的日志
+// 自动添加命名空间字段并调整调用栈信息
 func (l *zapLogger) Debug(msg string, fields ...zap.Field) {
 	logger := l.Logger.WithOptions(zap.AddCallerSkip(1))
 	if l.namespace != "" {

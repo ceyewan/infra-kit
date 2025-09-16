@@ -62,7 +62,7 @@ logger.Info("Processing request", clog.String("method", "POST"))
 // Output: {"trace_id": "abc123-def456", "msg": "Processing request", "method": "POST"}
 
 // Short alias
-clog.C(ctx).Info("Request completed")
+clog.WithContext(ctx).Info("Request completed")
 ```
 
 ### Provider Mode for Independent Loggers
@@ -125,8 +125,7 @@ func WithTraceID(ctx context.Context, traceID string) context.Context
 // Retrieve logger from context (auto-adds trace_id if present)
 func WithContext(ctx context.Context) Logger
 
-// Short alias
-func C(ctx context.Context) Logger  // Alias for WithContext
+
 ```
 
 ### Functional Options

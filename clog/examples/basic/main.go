@@ -85,7 +85,7 @@ func testConsoleOutput() {
 	userLogger.Warn("Console 用户警告", clog.String("id", "123"))
 
 	// Context
-	clog.C(ctx).Error("Console Context 错误")
+	clog.WithContext(ctx).Error("Console Context 错误")
 
 	// RootPath 效果在 AddSource 中显示相对路径
 	logger.Info("带 RootPath 的源码位置")

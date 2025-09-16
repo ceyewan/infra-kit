@@ -7,42 +7,44 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/ceyewan/gochat/im-infra/clog/internal"
+	"github.com/ceyewan/infra-kit/clog/internal"
 	"go.uber.org/zap"
 )
 
-// Logger 是内部 logger 的别名
+// Logger 定义统一的日志记录接口，封装 zap.Logger 提供类型安全的使用方式
 type Logger = internal.Logger
 
 var (
-	// 使用 atomic.Value 保证 defaultLogger 的并发安全
-	defaultLogger     atomic.Value
+	// defaultLogger 全局默认日志器，使用 atomic.Value 保证并发安全
+	defaultLogger atomic.Value
+
+	// defaultLoggerOnce 确保默认日志器只初始化一次
 	defaultLoggerOnce sync.Once
 
-	// exitFunc allows mocking os.Exit in tests
+	// exitFunc 退出函数，支持测试时进行 mock
 	exitFunc = os.Exit
 
-	// traceID 上下文键的类型安全封装
+	// traceIDKey 类型安全的上下文键，避免字符串键冲突
 	traceIDKey struct{}
 )
 
-// SetExitFunc sets the exit function for testing (used in tests to mock os.Exit)
+// SetExitFunc 设置退出函数，用于测试时模拟 os.Exit 行为
+// 调用此函数后，Fatal 日志将调用指定的函数而非直接退出程序
 func SetExitFunc(fn func(int)) {
 	exitFunc = fn
 	internal.SetExitFunc(fn)
 }
 
-// WithTraceID 将一个 trace_id 注入到 context 中，并返回一个新的 context
-
-// WithTraceID 将一个 trace_id 注入到 context 中，并返回一个新的 context
-// 这个函数通常在请求入口处（如 gRPC 拦截器或 HTTP 中间件）调用
+// WithTraceID 将 trace_id 注入到 context 中，返回新的 context
+// 通常在请求入口处调用，如 HTTP 中间件或 gRPC 拦截器
+// 注入的 trace_id 会被 WithContext 自动提取并添加到日志中
 func WithTraceID(ctx context.Context, traceID string) context.Context {
 	return context.WithValue(ctx, traceIDKey, traceID)
 }
 
-// WithContext 从 context 中获取一个 Logger 实例
+// WithContext 从 context 中获取 Logger 实例
 // 如果 ctx 中包含 trace_id，返回的 Logger 会自动在每条日志中添加 "trace_id" 字段
-// 这是在处理请求的函数中进行日志记录的【首选方式】
+// 这是业务代码中进行日志记录的首选方式，确保分布式链路追踪的连续性
 func WithContext(ctx context.Context) Logger {
 	logger := getDefaultLogger()
 
@@ -57,13 +59,15 @@ func WithContext(ctx context.Context) Logger {
 	return logger
 }
 
-// getDefaultLogger 获取默认日志器
+// getDefaultLogger 获取全局默认日志器
+// 使用延迟初始化模式，第一次调用时创建并缓存实例
+// 初始化失败时会创建 fallback logger 确保系统可用性
 func getDefaultLogger() Logger {
 	defaultLoggerOnce.Do(func() {
 		cfg := GetDefaultConfig("development")
 		logger, err := internal.NewLogger(cfg, "")
 		if err != nil {
-			// 当初始化失败时，至少应在标准错误中打印一条日志
+			// 初始化失败时至少在标准错误中打印错误信息
 			log.Printf("clog: failed to initialize default logger: %v", err)
 			logger = internal.NewFallbackLogger()
 		}
@@ -72,14 +76,21 @@ func getDefaultLogger() Logger {
 	return defaultLogger.Load().(Logger)
 }
 
-// New 创建一个独立的、可自定义的 Logger 实例
-// 这在需要将日志输出到不同位置或使用不同格式的特殊场景下很有用
-// ctx: 仅用于控制本次初始化过程的上下文。Logger 实例本身不会持有此上下文
-// opts: 一系列功能选项，如 WithNamespace()，用于定制 Logger 的行为
+// New 创建独立的 Logger 实例，支持自定义配置
+// 适用于需要特殊日志配置的场景，如不同输出位置或格式
+//
+// 参数：
+//   - ctx: 控制初始化过程的上下文，Logger 不持有此上下文
+//   - config: 日志配置，必须通过 Validate() 验证
+//   - opts: 功能选项，如 WithNamespace() 设置命名空间
+//
+// 返回：
+//   - Logger: 配置好的日志实例
+//   - error: 配置无效时的错误，或初始化警告
 func New(ctx context.Context, config *Config, opts ...Option) (Logger, error) {
 	// 验证配置有效性
 	if err := config.Validate(); err != nil {
-		// 对于明显无效的配置，直接返回错误，不创建 fallback logger
+		// 配置无效时直接返回错误，不创建 logger
 		return nil, err
 	}
 
@@ -87,20 +98,29 @@ func New(ctx context.Context, config *Config, opts ...Option) (Logger, error) {
 	options := ParseOptions(opts...)
 	logger, err := internal.NewLogger(config, options.Namespace)
 	if err != nil {
-		// 返回一个备用的 fallback logger 和原始错误
+		// 初始化失败时返回 fallback logger 和原始错误
 		return internal.NewFallbackLogger(), err
 	}
 	return logger, nil
 }
 
-// Init 初始化全局默认的日志器
-// 这是最常用的方式，通常在服务的 main 函数中调用一次
-// ctx: 仅用于控制本次初始化过程的上下文。Logger 实例本身不会持有此上下文
-// opts: 一系列功能选项，如 WithNamespace()，用于定制 Logger 的行为
+// Init 初始化全局默认日志器
+// 这是最常用的初始化方式，通常在服务的 main 函数中调用一次
+//
+// 参数：
+//   - ctx: 控制初始化过程的上下文，Logger 不持有此上下文
+//   - config: 日志配置，必须通过 Validate() 验证
+//   - opts: 功能选项，如 WithNamespace() 设置服务命名空间
+//
+// 返回：
+//   - error: 配置无效或初始化失败时的错误
+//
+// 注意：
+//   - 初始化失败时不会替换现有 logger，保持系统可用性
+//   - 重复调用会原子替换现有全局 logger
 func Init(ctx context.Context, config *Config, opts ...Option) error {
 	// 验证配置有效性
 	if err := config.Validate(); err != nil {
-		// 对于明显无效的配置，直接返回错误
 		return err
 	}
 
@@ -108,7 +128,7 @@ func Init(ctx context.Context, config *Config, opts ...Option) error {
 	options := ParseOptions(opts...)
 	logger, err := internal.NewLogger(config, options.Namespace)
 	if err != nil {
-		// 返回错误，但不替换现有 logger，保持系统可用性
+		// 初始化失败时返回错误，但不替换现有 logger
 		return err
 	}
 	// 原子替换全局 logger
@@ -116,43 +136,47 @@ func Init(ctx context.Context, config *Config, opts ...Option) error {
 	return nil
 }
 
-// Namespace 创建一个带有层次化命名空间的 Logger 实例
-// 支持链式调用来构建深层的命名空间路径，如 "service.module.component"
+// Namespace 创建带有层次化命名空间的 Logger 实例
+// 支持链式调用来构建深层命名空间路径，如 "service.module.component"
 // 这是区分不同业务模块或分层的推荐方式
+//
+// 示例：
+//
+//	userLogger := clog.Namespace("user")
+//	authLogger := userLogger.Namespace("auth")  // "user.auth"
+//	dbLogger := authLogger.Namespace("database") // "user.auth.database"
 func Namespace(name string) Logger {
 	return getDefaultLogger().Namespace(name)
 }
 
-// 全局日志方法
+// Debug 记录 Debug 级别的日志
+// 通常用于详细的调试信息，在生产环境中通常被禁用
 func Debug(msg string, fields ...Field) {
 	getDefaultLogger().WithOptions(zap.AddCallerSkip(1)).Debug(msg, fields...)
 }
 
+// Info 记录 Info 级别的日志
+// 用于记录一般的业务信息，如请求处理、状态变更等
 func Info(msg string, fields ...Field) {
 	getDefaultLogger().WithOptions(zap.AddCallerSkip(1)).Info(msg, fields...)
 }
 
+// Warn 记录 Warn 级别的日志
+// 用于记录可能需要注意但不影响系统正常运行的情况
 func Warn(msg string, fields ...Field) {
 	getDefaultLogger().WithOptions(zap.AddCallerSkip(1)).Warn(msg, fields...)
 }
 
-// Warning 是 Warn 的别名，提供更直观的 API
-func Warning(msg string, fields ...Field) {
-	getDefaultLogger().WithOptions(zap.AddCallerSkip(1)).Warn(msg, fields...)
-}
-
+// Error 记录 Error 级别的日志
+// 用于记录错误情况，但不影响系统继续运行
 func Error(msg string, fields ...Field) {
 	getDefaultLogger().WithOptions(zap.AddCallerSkip(1)).Error(msg, fields...)
 }
 
 // Fatal 记录 Fatal 级别的日志并退出程序
+// 用于记录严重错误，系统无法继续运行的情况
+// 记录日志后会调用 exitFunc(1) 退出程序
 func Fatal(msg string, fields ...Field) {
 	getDefaultLogger().WithOptions(zap.AddCallerSkip(1)).Fatal(msg, fields...)
 	exitFunc(1)
-}
-
-// C 是 WithContext 的简短别名，提供更简洁的 API
-// 使用示例：clog.C(ctx).Info("message", fields...)
-func C(ctx context.Context) Logger {
-	return WithContext(ctx)
 }

@@ -185,7 +185,7 @@ func testTraceID(t *testing.T) {
 	traceID := "test-trace-123"
 	ctx := WithTraceID(context.Background(), traceID)
 	WithContext(ctx).Info("traceid test")
-	C(ctx).Namespace("test").Info("alias test")
+	WithContext(ctx).Namespace("test").Info("alias test")
 
 	w.Close()
 	os.Stdout = oldStdout

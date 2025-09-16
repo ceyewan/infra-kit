@@ -14,10 +14,12 @@ func main() {
 	// 场景 1: 在服务启动时初始化全局 Logger
 	fmt.Println("=== 场景 1: 服务启动时初始化全局 Logger ===")
 
-	// 使用默认配置（推荐）
+	// 使用环境相关的默认配置（推荐做法）
+	// production 环境会自动使用 JSON 格式，info 级别，适合生产环境
 	config := clog.GetDefaultConfig("production")
 
-	// 初始化全局 logger
+	// 初始化全局 logger，设置服务命名空间为 "im-gateway"
+	// 这样所有日志都会自动包含 "namespace": "im-gateway" 字段
 	if err := clog.Init(context.Background(), config, clog.WithNamespace("im-gateway")); err != nil {
 		fmt.Printf("初始化 clog 失败: %v\n", err)
 		return
@@ -45,18 +47,30 @@ func main() {
 }
 
 // demonstrateHierarchicalNamespaces 演示层次化命名空间的使用
+// 层次化命名空间可以帮助清晰地组织日志，便于后续的日志分析和监控
 func demonstrateHierarchicalNamespaces() {
+	// 创建用户模块的根命名空间
+	// 所有日志会自动包含 "namespace": "im-gateway.user"
 	userLogger := clog.Namespace("user")
+
+	// 创建用户模块下的认证子命名空间
+	// 所有日志会自动包含 "namespace": "im-gateway.user.auth"
 	authLogger := userLogger.Namespace("auth")
+
+	// 创建用户模块下的数据库子命名空间
+	// 所有日志会自动包含 "namespace": "im-gateway.user.database"
 	dbLogger := userLogger.Namespace("database")
 
+	// 记录用户注册开始
 	userLogger.Info("开始用户注册流程", clog.String("email", "user@example.com"))
 
+	// 记录认证验证过程
 	authLogger.Info("验证用户密码强度")
 	if !validatePassword("weak") {
 		authLogger.Warn("密码强度不足")
 	}
 
+	// 记录数据库查询过程
 	dbLogger.Info("检查用户是否已存在")
 	exists, err := checkUserExists("user@example.com")
 	if err != nil {
@@ -64,6 +78,7 @@ func demonstrateHierarchicalNamespaces() {
 		return
 	}
 
+	// 根据查询结果记录相应信息
 	if exists {
 		userLogger.Warn("用户已存在", clog.String("email", "user@example.com"))
 	} else {
