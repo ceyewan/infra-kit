@@ -1,198 +1,195 @@
 # clog 使用示例
 
-本目录包含了 clog 包的各种使用示例，展示了如何按照 GoChat 项目规范使用结构化日志。
+本目录包含了 clog 包的使用示例，展示了如何按照 GoChat 项目规范使用结构化日志。
 
 ## 示例文件
 
-### 1. comprehensive/main.go - 综合示例
-**推荐阅读** - 这个示例完整演示了 clog 的所有核心功能和最佳实践。
+### 1. getting-started/main.go - 快速上手指南 ⭐ **推荐新手首先阅读**
+这个示例专门为初学者设计，涵盖了 clog 的核心功能和基本用法。
 
 **覆盖场景：**
-- 服务启动时的全局 logger 初始化
-- 层次化命名空间系统的使用
-- 链式命名空间创建
-- Gin HTTP 中间件集成
-- 上下文感知的日志记录
-- 完整的业务流程日志追踪
+- 环境相关配置（开发环境 vs 生产环境）
+- 基础日志记录（不同级别、结构化字段）
+- 层次化命名空间系统
+- 上下文感知日志与链路追踪
+- Options 配置模式
+- 文件输出功能
 
 **运行方式：**
 ```bash
-cd examples/comprehensive
+cd examples/getting-started
 go run main.go
 ```
 
-### 2. basic/main.go - 基础功能演示
-专注于 clog 的基础功能测试，适合初学者快速上手。
+### 2. advanced/main.go - 高级功能演示 ⭐ **推荐进阶阅读**
+这个示例展示了 clog 在实际生产环境中的高级用法和最佳实践。
 
 **覆盖场景：**
-- 控制台输出
-- JSON 文件输出
-- 层次化命名空间
-- Context 集成
-- 链式调用
+- HTTP 服务集成（Gin 框架）
+- 中间件实现（链路追踪、日志记录、异常恢复）
+- 复杂业务流程的日志追踪
+- 错误处理与监控策略
+- 性能优化技巧（批量操作、异步日志、条件日志）
 
 **运行方式：**
 ```bash
-cd examples/basic
+cd examples/advanced
 go run main.go
 ```
 
-### 3. options/main.go - Options 模式演示
-展示 clog 的 options 模式，提供用户友好的配置方式。
+### 3. rotation/main.go - 日志轮转演示
+专门演示日志文件轮转功能的使用。
 
 **覆盖场景：**
-- 使用 WithNamespace 配置命名空间
-- 创建独立的 logger 实例
-- 上下文与 options 结合使用
-- 链式命名空间调用
-- 多种输出格式混合使用
+- 文件输出配置
+- 日志轮转参数设置
+- 大小和数量控制
+- 压缩和清理策略
 
 **运行方式：**
 ```bash
-cd examples/options
+cd examples/rotation
 go run main.go
 ```
 
-**核心用法：**
+## 🎯 学习路径建议
+
+### 初学者路径：
+1. **getting-started/main.go** → 了解基本概念和用法
+2. **rotation/main.go** → 了解文件管理功能
+3. **advanced/main.go** → 学习生产环境最佳实践
+
+### 有经验开发者路径：
+1. **advanced/main.go** → 直接学习高级用法
+2. **getting-started/main.go** → 快速回顾基础功能
+3. **rotation/main.go** → 了解特定功能的实现
+
+## 📋 核心概念演示
+
+### 层次化命名空间系统
+所有示例都展示了 clog 的层次化命名空间特性：
+
 ```go
-// 使用 WithNamespace 初始化全局 logger
-err := clog.Init(ctx, config, clog.WithNamespace("im-gateway"))
-
-// 创建独立的 logger 实例
-logger, err := clog.New(ctx, config, clog.WithNamespace("order-service"))
-```
-
-## 核心概念演示
-
-### 1. 层次化命名空间系统
-
-```go
-// 创建不同层次的命名空间 logger
+// 创建模块级别的命名空间
 userLogger := clog.Namespace("user")
 authLogger := userLogger.Namespace("auth")
 dbLogger := userLogger.Namespace("database")
 
-userLogger.Info("开始用户注册流程", clog.String("email", req.Email))
-authLogger.Info("验证用户密码强度")
-dbLogger.Info("检查用户是否已存在")
+// 输出示例：
+// {"namespace": "advanced-demo.user", "msg": "用户模块启动"}
+// {"namespace": "advanced-demo.user.auth", "msg": "用户认证检查"}
+// {"namespace": "advanced-demo.user.database", "msg": "查询用户信息"}
 ```
 
-**输出示例：**
+### 上下文感知与链路追踪
+展示了分布式系统中链路追踪的实现：
+
+```go
+// 注入 trace ID
+ctx := clog.WithTraceID(context.Background(), "trace-123")
+
+// 获取带 trace ID 的 logger
+logger := clog.WithContext(ctx)
+logger.Info("处理请求") // 自动包含 trace_id 字段
+```
+
+### Options 配置模式
+演示了函数式选项模式的使用：
+
+```go
+// 使用选项初始化
+err := clog.Init(ctx, config, clog.WithNamespace("my-service"))
+
+// 创建独立 logger
+logger, err := clog.New(ctx, config, clog.WithNamespace("payment-service"))
+```
+
+## 🏗️ 架构设计
+
+示例代码展示了 clog 在不同架构层次中的应用：
+
+### 应用层
+- HTTP 请求处理
+- 业务流程管理
+- 错误处理策略
+
+### 服务治理层  
+- 中间件实现
+- 监控和指标
+- 性能优化
+
+### 基础设施层
+- 日志配置管理
+- 文件轮转策略
+- 输出格式控制
+
+## 🚀 运行示例
+
+### 前置条件
+确保 Go 环境已正确配置：
+```bash
+go version  # 应该显示 Go 1.18+
+```
+
+### 运行单个示例
+```bash
+# 快速上手指南
+cd examples/getting-started && go run main.go
+
+# 高级功能演示  
+cd examples/advanced && go run main.go
+
+# 日志轮转演示
+cd examples/rotation && go run main.go
+```
+
+### 运行所有示例
+```bash
+# 在项目根目录运行
+find examples -name "main.go" -execdir go run {} \;
+```
+
+## 📊 输出示例
+
+### 控制台输出（开发环境）
+```
+2025-09-16 19:23:05.696	INFO	/Users/harrick/CodeField/infra-kit/clog/examples/getting-started/main.go:88	用户登录	{"email": "user@example.com", "user_id": "12345"}
+```
+
+### JSON 输出（生产环境）
 ```json
-{"namespace": "im-gateway.user", "trace_id": "abc123", "msg": "开始用户注册流程"}
-{"namespace": "im-gateway.user.auth", "trace_id": "abc123", "msg": "验证用户密码强度"}
-{"namespace": "im-gateway.user.database", "trace_id": "abc123", "msg": "检查用户是否已存在"}
-```
-
-### 2. 上下文与 TraceID 管理
-
-```go
-// 中间件：注入 traceID 到 context
-func TraceMiddleware() gin.HandlerFunc {
-    return func(c *gin.Context) {
-        traceID := c.GetHeader("X-Trace-ID")
-        if traceID == "" {
-            traceID = uuid.NewString()
-        }
-        
-        // 注入到 context
-        ctx := clog.WithTraceID(c.Request.Context(), traceID)
-        c.Request = c.Request.WithContext(ctx)
-        
-        c.Header("X-Trace-ID", traceID)
-        c.Next()
-    }
-}
-
-// 业务代码：从 context 获取 logger
-func (s *UserService) CreateUser(ctx context.Context, req *RegisterRequest) error {
-    logger := clog.WithContext(ctx) // 自动包含 trace_id
-    
-    logger.Info("开始处理创建用户请求",
-        clog.String("sender_id", req.SenderID),
-        clog.String("email", req.Email))
-    
-    // 业务逻辑...
-    return nil
+{
+  "level": "info",
+  "time": "2025-09-16 19:23:05.696",
+  "caller": "examples/advanced/main.go:234",
+  "msg": "HTTP 请求完成",
+  "namespace": "advanced-demo.http",
+  "method": "POST",
+  "path": "/api/users",
+  "status": 201,
+  "latency": "54.123ms",
+  "trace_id": "trace-123456"
 }
 ```
 
-### 3. 服务初始化模式
+## 💡 最佳实践
 
-```go
-// 在 main.go 中初始化
-func main() {
-    // 使用环境相关的默认配置
-    config := clog.GetDefaultConfig("production")
-    
-    // 初始化全局 logger，设置服务命名空间
-    if err := clog.Init(context.Background(), config, clog.WithNamespace("im-gateway")); err != nil {
-        log.Fatalf("初始化 clog 失败: %v", err)
-    }
+从这些示例中，您可以学到以下最佳实践：
 
-    clog.Info("服务启动成功")
-}
-```
+1. **统一的初始化模式**：在服务启动时统一初始化 logger
+2. **层次化命名空间**：根据业务模块创建清晰的命名空间层次
+3. **链路追踪集成**：在请求入口注入 trace ID，贯穿整个调用链
+4. **错误处理策略**：使用结构化字段记录详细的错误信息
+5. **性能优化**：在高并发场景下使用适当的日志策略
+6. **监控集成**：通过日志记录系统健康状态和性能指标
 
-### 4. 链式命名空间创建
+## 🔄 从旧版本迁移
 
-```go
-func (s *PaymentService) ProcessPayment(ctx context.Context, req *PaymentRequest) error {
-    // 链式创建深层命名空间
-    paymentLogger := clog.Namespace("payment").Namespace("processor").Namespace("stripe")
-    
-    paymentLogger.Info("开始处理支付请求", clog.String("order_id", req.OrderID))
-    return nil
-}
-```
+如果您之前使用过旧版本的示例，主要变化：
 
-## 设计优势
+- 删除了 `basic/main.go`，功能整合到 `getting-started/main.go`
+- 删除了 `comprehensive/main.go`，高级功能整合到 `advanced/main.go`
+- 删除了 `options/main.go`，配置功能整合到 `getting-started/main.go`
+- 保留了 `rotation/main.go`，功能专注且独特
 
-### 层次化命名空间的核心价值
-
-1. **消除功能重复**
-   - 旧方案：`WithService("im-gateway")` + `Module("user")` → 两套相似API
-   - 新方案：`WithNamespace("im-gateway")` + `Namespace("user")` → 统一的层次化API
-
-2. **提供组合灵活性**
-   ```go
-   baseLogger := clog.Namespace("user")                    // "im-gateway.user"
-   authLogger := baseLogger.Namespace("auth")              // "im-gateway.user.auth" 
-   passwordLogger := authLogger.Namespace("password")      // "im-gateway.user.auth.password"
-   ```
-
-3. **概念清晰化**
-   - 统一概念：所有标识都是"命名空间"
-   - 自然层次：如文件系统路径般直观
-   - 一致API：所有层次都使用相同的 `Namespace()` 方法
-
-4. **可观测性增强**
-   ```json
-   {
-     "namespace": "im-gateway.user.auth.password",
-     "trace_id": "abc123-def456",
-     "msg": "密码验证成功",
-     "user_id": "12345"
-   }
-   ```
-
-## 迁移指南
-
-### 从旧 API 迁移到新 API
-
-| 旧 API | 新 API | 说明 |
-|--------|--------|------|
-| `clog.Module("user")` | `clog.Namespace("user")` | 统一使用命名空间概念 |
-| `clog.Init(config)` | `clog.Init(ctx, &config, opts...)` | 添加上下文和选项参数 |
-| `clog.New(config)` | `clog.New(ctx, &config, opts...)` | 添加上下文和选项参数 |
-| `ctx = context.WithValue(ctx, "traceID", id)` | `ctx = clog.WithTraceID(ctx, id)` | 使用类型安全的 traceID 注入 |
-| `clog.SetTraceIDHook(hook)` | 移除 | 不再需要自定义 hook |
-| `logger.Module("sub")` | `logger.Namespace("sub")` | 统一使用命名空间方法 |
-
-## 最佳实践
-
-1. **在服务启动时初始化**：在 `main.go` 中调用 `clog.Init()` 并设置服务命名空间
-2. **使用层次化命名空间**：根据业务模块创建清晰的命名空间层次
-3. **中间件注入 TraceID**：在请求入口处注入 traceID 并在整个调用链中传递
-4. **上下文感知日志**：业务代码中始终使用 `clog.WithContext(ctx)` 获取 logger
-5. **环境相关配置**：使用 `clog.GetDefaultConfig(env)` 获取环境优化的默认配置
+新的示例结构更加清晰，学习路径更加明确。
