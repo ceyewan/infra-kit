@@ -2,7 +2,7 @@
 
 ## 1. 设计理念
 
-`clog` 是 `gochat-kit` 项目的结构化日志组件，基于 `uber-go/zap` 构建。它为微服务架构提供了统一、高性能、上下文感知的日志解决方案。
+`clog` 是 `infra-kit` 项目的结构化日志组件，基于 `uber-go/zap` 构建。它为微服务架构提供了统一、高性能、上下文感知的日志解决方案。
 
 ### 核心设计原则
 
@@ -83,7 +83,7 @@ type Logger interface {
     Warn(msg string, fields ...Field)
     Error(msg string, fields ...Field)
     Fatal(msg string, fields ...Field)
-    
+
     // Namespace 创建子命名空间
     Namespace(name string) Logger
 }
@@ -110,14 +110,14 @@ func (p *clogProvider) watchConfigChanges(ctx context.Context) {
     if p.coord == nil {
         return
     }
-    
+
     configPath := "/config/clog/"
     watcher, err := p.coord.Config().WatchPrefix(ctx, configPath, &p.config)
     if err != nil {
         p.logger.Error("监听 clog 配置失败", clog.Err(err))
         return
     }
-    
+
     go func() {
         for range watcher.Changes() {
             p.updateLogger()
@@ -128,10 +128,10 @@ func (p *clogProvider) watchConfigChanges(ctx context.Context) {
 func (p *clogProvider) updateLogger() {
     // 根据新配置重新创建日志器
     newLogger := p.createLogger(p.config)
-    
+
     // 原子性地更新日志器引用
     atomic.StorePointer(&p.loggerPtr, unsafe.Pointer(&newLogger))
-    
+
     p.logger.Info("clog 配置已更新")
 }
 ```
@@ -164,7 +164,7 @@ func (n *namespacedLogger) Info(msg string, fields ...Field) {
     // 自动添加命名空间字段
     namespaceField := zap.String("namespace", n.getFullNamespace())
     fields = append([]Field{namespaceField}, fields...)
-    
+
     // 获取实际的 zap.Logger 并记录
     logger := n.provider.getLogger()
     logger.Info(msg, fields...)
@@ -194,15 +194,15 @@ func (p *clogProvider) WithTraceID(ctx context.Context, traceID string) context.
 func (p *clogProvider) WithContext(ctx context.Context) Logger {
     // 获取 trace_id
     traceID, _ := ctx.Value(traceIDKey{}).(string)
-    
+
     // 创建基础日志器
     logger := p.Namespace("")
-    
+
     // 如果有 trace_id，添加到所有日志中
     if traceID != "" {
         return logger.With(zap.String("trace_id", traceID))
     }
-    
+
     return logger
 }
 ```
@@ -221,16 +221,16 @@ type clogProvider struct {
 func (p *clogProvider) createLogger(config *Config) *zap.Logger {
     // 创建 zap 配置
     zapConfig := zap.NewProductionConfig()
-    
+
     // 根据配置调整
     if config.Format == "console" {
         zapConfig = zap.NewDevelopmentConfig()
     }
-    
+
     zapConfig.Level = zap.NewAtomicLevelAt(parseLevel(config.Level))
     zapConfig.OutputPaths = []string{config.Output}
     zapConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-    
+
     // 创建日志器
     logger, _ := zapConfig.Build()
     return logger
@@ -249,11 +249,11 @@ func (p *clogProvider) getLogger() *zap.Logger {
 ```go
 func main() {
     ctx := context.Background()
-    
+
     // 1. 初始化日志组件
     config := clog.GetDefaultConfig("production")
     config.Output = "/var/log/app.log"
-    
+
     clogProvider, err := clog.New(ctx, config,
         clog.WithNamespace("user-service"),
         clog.WithCoordProvider(coordProvider), // 可选，用于动态配置
@@ -262,7 +262,7 @@ func main() {
         log.Fatal("clog 初始化失败:", err)
     }
     defer clogProvider.Close()
-    
+
     // 或者使用全局初始化
     if err := clog.Init(ctx, config, clog.WithNamespace("user-service")); err != nil {
         log.Fatal("clog 初始化失败:", err)
@@ -280,11 +280,11 @@ func TraceMiddleware() gin.HandlerFunc {
         if traceID == "" {
             traceID = uuid.New().String()
         }
-        
+
         // 2. 注入到 context
         ctx := clog.WithTraceID(c.Request.Context(), traceID)
         c.Request = c.Request.WithContext(ctx)
-        
+
         c.Header("X-Trace-ID", traceID)
         c.Next()
     }
@@ -293,16 +293,16 @@ func TraceMiddleware() gin.HandlerFunc {
 func (s *UserService) GetUser(c *gin.Context) {
     ctx := c.Request.Context()
     logger := clog.WithContext(ctx)
-    
+
     user, err := s.userRepo.GetUser(ctx, c.Param("id"))
     if err != nil {
-        logger.Error("获取用户失败", 
+        logger.Error("获取用户失败",
             clog.String("user_id", c.Param("id")),
             clog.Err(err))
         c.JSON(500, gin.H{"error": "获取用户失败"})
         return
     }
-    
+
     logger.Info("获取用户成功", clog.String("user_id", user.ID))
     c.JSON(200, user)
 }
@@ -313,26 +313,26 @@ func (s *UserService) GetUser(c *gin.Context) {
 ```go
 func (s *OrderService) ProcessOrder(ctx context.Context, orderID string) error {
     logger := clog.WithContext(ctx)
-    
+
     // 创建不同层次的命名空间
     orderLogger := logger.Namespace("order")
     paymentLogger := orderLogger.Namespace("payment")
     inventoryLogger := orderLogger.Namespace("inventory")
-    
+
     orderLogger.Info("开始处理订单", clog.String("order_id", orderID))
-    
+
     // 支付处理
     if err := s.processPayment(ctx, orderID); err != nil {
         paymentLogger.Error("支付处理失败", clog.Err(err))
         return err
     }
-    
+
     // 库存检查
     if err := s.checkInventory(ctx, orderID); err != nil {
         inventoryLogger.Error("库存检查失败", clog.Err(err))
         return err
     }
-    
+
     orderLogger.Info("订单处理成功", clog.String("order_id", orderID))
     return nil
 }
@@ -343,40 +343,40 @@ func (s *OrderService) ProcessOrder(ctx context.Context, orderID string) error {
 ```go
 func (s *UserService) CreateUser(ctx context.Context, req *CreateUserRequest) (*User, error) {
     logger := clog.WithContext(ctx).Namespace("user").Namespace("create")
-    
-    logger.Info("开始创建用户", 
+
+    logger.Info("开始创建用户",
         clog.String("email", req.Email),
         clog.String("username", req.Username))
-    
+
     // 验证输入
     if err := validateUserRequest(req); err != nil {
         logger.Warn("用户请求验证失败", clog.Err(err))
         return nil, fmt.Errorf("验证失败: %w", err)
     }
-    
+
     // 检查用户是否存在
     exists, err := s.userRepo.UserExists(ctx, req.Email)
     if err != nil {
         logger.Error("检查用户存在性失败", clog.Err(err))
         return nil, fmt.Errorf("检查用户失败: %w", err)
     }
-    
+
     if exists {
         logger.Warn("用户已存在", clog.String("email", req.Email))
         return nil, fmt.Errorf("用户已存在")
     }
-    
+
     // 创建用户
     user, err := s.userRepo.CreateUser(ctx, req)
     if err != nil {
         logger.Error("创建用户失败", clog.Err(err))
         return nil, fmt.Errorf("创建用户失败: %w", err)
     }
-    
-    logger.Info("用户创建成功", 
+
+    logger.Info("用户创建成功",
         clog.String("user_id", user.ID),
         clog.String("email", user.Email))
-    
+
     return user, nil
 }
 ```
@@ -401,11 +401,11 @@ func (n *namespacedLogger) Info(msg string, fields ...Field) {
         pooledFields = pooledFields[:0]
         fieldPool.Put(pooledFields)
     }()
-    
+
     // 添加命名空间字段
     pooledFields = append(pooledFields, zap.String("namespace", n.getFullNamespace()))
     pooledFields = append(pooledFields, fields...)
-    
+
     // 获取实际的 zap.Logger 并记录
     logger := n.provider.getLogger()
     logger.Info(msg, pooledFields...)
@@ -417,16 +417,16 @@ func (n *namespacedLogger) Info(msg string, fields ...Field) {
 ```go
 func createLogger(config *Config) *zap.Logger {
     zapConfig := zap.NewProductionConfig()
-    
+
     // 启用异步输出以提高性能
     zapConfig.OutputPaths = []string{"stdout"}
     zapConfig.ErrorOutputPaths = []string{"stderr"}
-    
+
     // 根据环境调整缓冲区大小
     if os.Getenv("GO_ENV") == "production" {
         zapConfig.EncoderConfig.TimeKey = "timestamp"
     }
-    
+
     logger, _ := zapConfig.Build()
     return logger
 }
@@ -440,19 +440,19 @@ func createLogger(config *Config) *zap.Logger {
 func (p *clogProvider) HealthCheck(ctx context.Context) error {
     // 检查日志器是否正常工作
     logger := p.getLogger()
-    
+
     // 尝试写入测试日志
     if err := logger.Sync(); err != nil {
         return fmt.Errorf("日志同步失败: %w", err)
     }
-    
+
     // 检查配置中心连接
     if p.coord != nil {
         if err := p.coord.Ping(ctx); err != nil {
             return fmt.Errorf("配置中心连接失败: %w", err)
         }
     }
-    
+
     return nil
 }
 ```
@@ -464,7 +464,7 @@ func (p *clogProvider) setupRotation(config *Config) {
     if config.Output == "stdout" || config.Output == "stderr" {
         return
     }
-    
+
     // 创建日志轮转配置
     rotationConfig := rotatelogs.Config{
         Path:         config.Output,
@@ -472,7 +472,7 @@ func (p *clogProvider) setupRotation(config *Config) {
         MaxAge:       time.Duration(config.Rotation.MaxAge) * 24 * time.Hour,
         Rotator:      rotatelogs.NewDefaultRotator(),
     }
-    
+
     // 设置轮转钩子
     logger := p.getLogger()
     logger = logger.WithOptions(zap.Hooks(func(entry zapcore.Entry) error {
@@ -496,7 +496,7 @@ func (p *clogProvider) setupRotation(config *Config) {
 
 ```go
 // 推荐的字段命名规范
-logger.Info("用户登录成功", 
+logger.Info("用户登录成功",
     clog.String("user_id", "12345"),
     clog.String("username", "john_doe"),
     clog.String("ip_address", "192.168.1.100"),

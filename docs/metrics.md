@@ -20,28 +20,28 @@ Metrics 组件实现了基于 Provider 模式的可观测性管理，支持自�
 type Provider interface {
     // GRPCServerInterceptor 返回 gRPC 服务端拦截器
     GRPCServerInterceptor() grpc.UnaryServerInterceptor
-    
+
     // GRPCClientInterceptor 返回 gRPC 客户端拦截器
     GRPCClientInterceptor() grpc.UnaryClientInterceptor
-    
+
     // HTTPMiddleware 返回 HTTP 中间件
     HTTPMiddleware() gin.HandlerFunc
-    
+
     // NewCounter 创建计数器指标
     NewCounter(name, description string) (Counter, error)
-    
+
     // NewHistogram 创建直方图指标
     NewHistogram(name, description, unit string) (Histogram, error)
-    
+
     // NewGauge 创建仪表指标
     NewGauge(name, description string) (Gauge, error)
-    
+
     // GetMeter 获取 OpenTelemetry Meter
     GetMeter() metric.Meter
-    
+
     // GetTracer 获取 OpenTelemetry Tracer
     GetTracer() trace.Tracer
-    
+
     // Shutdown 优雅关闭所有服务
     Shutdown(ctx context.Context) error
 }
@@ -70,31 +70,31 @@ type Gauge interface {
 type Config struct {
     // ServiceName 服务名称
     ServiceName string `json:"serviceName"`
-    
+
     // ServiceVersion 服务版本
     ServiceVersion string `json:"serviceVersion"`
-    
+
     // Environment 运行环境
     Environment string `json:"environment"`
-    
+
     // ExporterType 导出器类型
     ExporterType string `json:"exporterType"`
-    
+
     // ExporterEndpoint 导出器端点
     ExporterEndpoint string `json:"exporterEndpoint"`
-    
+
     // PrometheusListenAddr Prometheus 监听地址
     PrometheusListenAddr string `json:"prometheusListenAddr"`
-    
+
     // SamplerType 采样器类型
     SamplerType string `json:"samplerType"`
-    
+
     // SamplerRatio 采样比例
     SamplerRatio float64 `json:"samplerRatio"`
-    
+
     // ResourceAttributes 资源属性
     ResourceAttributes map[string]string `json:"resourceAttributes"`
-    
+
     // ViewConfig 指标视图配置
     ViewConfig []ViewConfig `json:"viewConfig"`
 }
@@ -266,39 +266,39 @@ package main
 
 import (
     "context"
-    
-    "github.com/gochat-kit/metrics"
-    "github.com/gochat-kit/clog"
+
+    "github.com/infra-kit/metrics"
+    "github.com/infra-kit/clog"
 )
 
 func main() {
     ctx := context.Background()
-    
+
     // 初始化依赖组件
     logger := clog.New(ctx, &clog.Config{})
-    
+
     // 获取默认配置
     config := metrics.GetDefaultConfig("user-service", "production")
     config.PrometheusListenAddr = ":9090"
     config.ExporterEndpoint = "http://jaeger:14268/api/traces"
-    
+
     // 创建可观测性Provider
     opts := []metrics.Option{
         metrics.WithLogger(logger),
     }
-    
+
     metricsProvider, err := metrics.New(ctx, config, opts...)
     if err != nil {
         logger.Fatal("创建可观测性Provider失败", clog.Err(err))
     }
     defer metricsProvider.Shutdown(ctx)
-    
+
     // 创建自定义指标
     userCounter, err := metricsProvider.NewCounter("user_operations_total", "用户操作总数")
     if err != nil {
         logger.Fatal("创建指标失败", clog.Err(err))
     }
-    
+
     // 使用指标
     userCounter.Inc(ctx, attribute.String("operation", "create"))
 }
@@ -311,9 +311,9 @@ package server
 
 import (
     "context"
-    
-    "github.com/gochat-kit/metrics"
-    "github.com/gochat-kit/clog"
+
+    "github.com/infra-kit/metrics"
+    "github.com/infra-kit/clog"
     "google.golang.org/grpc"
 )
 
@@ -337,10 +337,10 @@ func (s *UserService) StartGRPCServer() error {
             // 其他拦截器
         ),
     )
-    
+
     // 注册服务
     // pb.RegisterUserServiceServer(server, s)
-    
+
     // 启动服务器
     // return server.ListenAndServe(":8080")
     return nil
@@ -350,30 +350,30 @@ func (s *UserService) CreateUser(ctx context.Context, req *CreateUserRequest) (*
     // 创建自定义指标
     operationCounter, _ := s.metricsProvider.NewCounter("user_operations_total", "用户操作总数")
     operationHistogram, _ := s.metricsProvider.NewHistogram("user_operation_duration_seconds", "用户操作耗时", "s")
-    
+
     // 记录操作开始
     startTime := time.Now()
-    
+
     // 执行业务逻辑
     err := s.doCreateUser(ctx, req)
-    
+
     // 记录指标
     duration := time.Since(startTime).Seconds()
     operationHistogram.Record(ctx, duration, attribute.String("operation", "create_user"))
-    
+
     if err != nil {
-        operationCounter.Inc(ctx, 
+        operationCounter.Inc(ctx,
             attribute.String("operation", "create_user"),
             attribute.String("status", "failed"),
         )
         return nil, err
     }
-    
-    operationCounter.Inc(ctx, 
+
+    operationCounter.Inc(ctx,
         attribute.String("operation", "create_user"),
         attribute.String("status", "success"),
     )
-    
+
     return &CreateUserResponse{}, nil
 }
 
@@ -390,9 +390,9 @@ package api
 
 import (
     "context"
-    
-    "github.com/gochat-kit/metrics"
-    "github.com/gochat-kit/clog"
+
+    "github.com/infra-kit/metrics"
+    "github.com/infra-kit/clog"
     "github.com/gin-gonic/gin"
 )
 
@@ -411,14 +411,14 @@ func NewAPIServer(metricsProvider metrics.Provider, logger clog.Logger) *APIServ
 func (s *APIServer) StartHTTPServer() error {
     // 创建Gin引擎
     engine := gin.New()
-    
+
     // 注册中间件
     engine.Use(s.metricsProvider.HTTPMiddleware())
     engine.Use(gin.Recovery())
-    
+
     // 注册路由
     s.setupRoutes(engine)
-    
+
     // 启动服务器
     return engine.Run(":8080")
 }
@@ -426,7 +426,7 @@ func (s *APIServer) StartHTTPServer() error {
 func (s *APIServer) setupRoutes(engine *gin.Engine) {
     // 健康检查
     engine.GET("/health", s.healthCheck)
-    
+
     // 用户相关接口
     userGroup := engine.Group("/users")
     {
@@ -438,17 +438,17 @@ func (s *APIServer) setupRoutes(engine *gin.Engine) {
 func (s *APIServer) healthCheck(c *gin.Context) {
     // 创建自定义指标
     healthGauge, _ := s.metricsProvider.NewGauge("health_check_status", "健康检查状态")
-    
+
     // 执行健康检查
     isHealthy := s.doHealthCheck(c.Request.Context())
-    
+
     // 记录指标
     status := 0.0
     if isHealthy {
         status = 1.0
     }
     healthGauge.Record(c.Request.Context(), status, attribute.String("service", "user-service"))
-    
+
     if isHealthy {
         c.JSON(200, gin.H{"status": "healthy"})
     } else {

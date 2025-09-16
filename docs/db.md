@@ -2,7 +2,7 @@
 
 ## 1. 设计理念
 
-`db` 是 `gochat-kit` 项目的数据库访问组件，基于 `GORM v2` 构建。它是一个专注于 MySQL 的高性能数据库操作层，提供了分库分表、连接池管理、事务处理等核心功能。
+`db` 是 `infra-kit` 项目的数据库访问组件，基于 `GORM v2` 构建。它是一个专注于 MySQL 的高性能数据库操作层，提供了分库分表、连接池管理、事务处理等核心功能。
 
 ### 核心设计原则
 
@@ -122,10 +122,10 @@ type dbProvider struct {
     logger  clog.Logger
     metrics metrics.Provider
     coord   coord.Provider
-    
+
     // 分片相关
     sharding *shardingManager
-    
+
     // 连接池监控
     poolStats *sql.DBStats
 }
@@ -136,13 +136,13 @@ func (p *dbProvider) createDB(config *Config) (*gorm.DB, error) {
     if err != nil {
         return nil, fmt.Errorf("创建数据库连接失败: %w", err)
     }
-    
+
     // 配置连接池
     sqlDB.SetMaxOpenConns(config.MaxOpenConns)
     sqlDB.SetMaxIdleConns(config.MaxIdleConns)
     sqlDB.SetConnMaxLifetime(config.ConnMaxLifetime)
     sqlDB.SetConnMaxIdleTime(config.ConnMaxIdleTime)
-    
+
     // 创建 GORM 实例
     gormConfig := &gorm.Config{
         Logger: p.createGormLogger(),
@@ -151,21 +151,21 @@ func (p *dbProvider) createDB(config *Config) (*gorm.DB, error) {
             SingularTable: true,
         },
     }
-    
+
     db, err := gorm.Open(mysql.New(mysql.Config{
         Conn: sqlDB,
     }), gormConfig)
     if err != nil {
         return nil, fmt.Errorf("创建 GORM 实例失败: %w", err)
     }
-    
+
     // 配置分片
     if config.Sharding != nil {
         if err := p.setupSharding(db, config.Sharding); err != nil {
             return nil, fmt.Errorf("配置分片失败: %w", err)
         }
     }
-    
+
     return db, nil
 }
 ```
@@ -188,7 +188,7 @@ func (p *dbProvider) setupSharding(db *gorm.DB, config *ShardingConfig) error {
         shards:      make(map[int]*gorm.DB),
         shardStates: make(map[string]*ShardInfo),
     }
-    
+
     // 注册分片插件
     err := db.Use(sharding.Register(sharding.Config{
         ShardingKey: config.ShardingKey,
@@ -198,11 +198,11 @@ func (p *dbProvider) setupSharding(db *gorm.DB, config *ShardingConfig) error {
             return fmt.Sprintf("%s_%v", table, value), nil
         },
     }, sharding.NewMySQL()))
-    
+
     if err != nil {
         return fmt.Errorf("注册分片插件失败: %w", err)
     }
-    
+
     // 初始化分片连接
     return p.initializeShards(db)
 }
@@ -210,7 +210,7 @@ func (p *dbProvider) setupSharding(db *gorm.DB, config *ShardingConfig) error {
 func (p *dbProvider) createShardFunction() func(interface{}) int {
     return func(key interface{}) int {
         var hash int64
-        
+
         switch v := key.(type) {
         case int, int8, int16, int32, int64:
             hash = int64(v)
@@ -223,7 +223,7 @@ func (p *dbProvider) createShardFunction() func(interface{}) int {
             // 其他类型转换为字符串后哈希
             hash = p.stringHash(fmt.Sprintf("%v", v))
         }
-        
+
         // 取绝对值并取模
         abs := hash
         if abs < 0 {
@@ -247,10 +247,10 @@ func (p *dbProvider) stringHash(s string) int64 {
 ```go
 func (p *dbProvider) Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
     logger := clog.WithContext(ctx)
-    
+
     // 获取数据库实例
     db := p.db.WithContext(ctx)
-    
+
     // 开始事务
     tx := db.Begin()
     defer func() {
@@ -259,26 +259,26 @@ func (p *dbProvider) Transaction(ctx context.Context, fn func(tx *gorm.DB) error
             logger.Error("事务 panic", clog.Any("recover", r))
         }
     }()
-    
+
     // 执行事务函数
     if err := fn(tx); err != nil {
         // 事务回滚
         if rbErr := tx.Rollback().Error; rbErr != nil {
-            logger.Error("事务回滚失败", 
-                clog.Err(err), 
+            logger.Error("事务回滚失败",
+                clog.Err(err),
                 clog.Err("rollback_error", rbErr))
         } else {
             logger.Warn("事务回滚成功", clog.Err(err))
         }
         return err
     }
-    
+
     // 提交事务
     if err := tx.Commit().Error; err != nil {
         logger.Error("事务提交失败", clog.Err(err))
         return err
     }
-    
+
     logger.Info("事务提交成功")
     return nil
 }
@@ -290,7 +290,7 @@ func (p *dbProvider) Transaction(ctx context.Context, fn func(tx *gorm.DB) error
 func (p *dbProvider) startMetricsCollection(ctx context.Context) {
     ticker := time.NewTicker(30 * time.Second)
     defer ticker.Stop()
-    
+
     for {
         select {
         case <-ctx.Done():
@@ -305,14 +305,14 @@ func (p *dbProvider) collectMetrics() {
     if p.db == nil {
         return
     }
-    
+
     sqlDB, err := p.db.DB()
     if err != nil {
         return
     }
-    
+
     stats := sqlDB.Stats()
-    
+
     // 上报连接池指标
     if p.metrics != nil {
         p.metrics.Gauge("db.pool.open_connections", float64(stats.OpenConnections))
@@ -327,30 +327,30 @@ func (p *dbProvider) HealthCheck(ctx context.Context) error {
     if p.db == nil {
         return fmt.Errorf("数据库未初始化")
     }
-    
+
     sqlDB, err := p.db.DB()
     if err != nil {
         return fmt.Errorf("获取数据库连接失败: %w", err)
     }
-    
+
     // 检查连接
     if err := sqlDB.Ping(); err != nil {
         return fmt.Errorf("数据库连接失败: %w", err)
     }
-    
+
     // 检查连接池状态
     stats := sqlDB.Stats()
     if stats.OpenConnections <= 0 {
         return fmt.Errorf("连接池中没有可用连接")
     }
-    
+
     // 检查分片状态
     if p.sharding != nil {
         if err := p.checkShardsHealth(ctx); err != nil {
             return fmt.Errorf("分片健康检查失败: %w", err)
         }
     }
-    
+
     return nil
 }
 ```
@@ -362,11 +362,11 @@ func (p *dbProvider) HealthCheck(ctx context.Context) error {
 ```go
 func main() {
     ctx := context.Background()
-    
+
     // 1. 初始化数据库组件
     config := db.GetDefaultConfig("production")
     config.DSN = "user:password@tcp(localhost:3306)/app_db?charset=utf8mb4&parseTime=True&loc=Local"
-    
+
     // 配置分片
     config.Sharding = &db.ShardingConfig{
         ShardingKey:    "user_id",
@@ -382,7 +382,7 @@ func main() {
             },
         },
     }
-    
+
     dbProvider, err := db.New(ctx, config,
         db.WithLogger(clog.Namespace("db")),
         db.WithCoordProvider(coordProvider),
@@ -404,7 +404,7 @@ type UserService struct {
 
 func (s *UserService) CreateUser(ctx context.Context, req *CreateUserRequest) (*User, error) {
     logger := clog.WithContext(ctx)
-    
+
     user := &User{
         ID:        uuid.New().String(),
         Username:  req.Username,
@@ -412,20 +412,20 @@ func (s *UserService) CreateUser(ctx context.Context, req *CreateUserRequest) (*
         CreatedAt: time.Now(),
         UpdatedAt: time.Now(),
     }
-    
+
     // 插入用户
     if err := s.db.DB(ctx).Create(user).Error; err != nil {
         logger.Error("创建用户失败", clog.Err(err))
         return nil, fmt.Errorf("创建用户失败: %w", err)
     }
-    
+
     logger.Info("用户创建成功", clog.String("user_id", user.ID))
     return user, nil
 }
 
 func (s *UserService) GetUser(ctx context.Context, userID string) (*User, error) {
     logger := clog.WithContext(ctx)
-    
+
     var user User
     if err := s.db.DB(ctx).Where("id = ?", userID).First(&user).Error; err != nil {
         if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -434,7 +434,7 @@ func (s *UserService) GetUser(ctx context.Context, userID string) (*User, error)
         logger.Error("查询用户失败", clog.Err(err))
         return nil, fmt.Errorf("查询用户失败: %w", err)
     }
-    
+
     return &user, nil
 }
 ```
@@ -444,14 +444,14 @@ func (s *UserService) GetUser(ctx context.Context, userID string) (*User, error)
 ```go
 func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
     logger := clog.WithContext(ctx)
-    
+
     var order *Order
     err := s.db.Transaction(ctx, func(tx *gorm.DB) error {
         // 1. 扣减库存
         if err := s.decreaseInventory(ctx, tx, req.ProductID, req.Quantity); err != nil {
             return fmt.Errorf("扣减库存失败: %w", err)
         }
-        
+
         // 2. 创建订单
         order = &Order{
             ID:         uuid.New().String(),
@@ -462,11 +462,11 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
             Status:     "pending",
             CreatedAt:  time.Now(),
         }
-        
+
         if err := tx.Create(order).Error; err != nil {
             return fmt.Errorf("创建订单失败: %w", err)
         }
-        
+
         // 3. 创建支付记录
         payment := &Payment{
             ID:        uuid.New().String(),
@@ -475,22 +475,22 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
             Status:    "pending",
             CreatedAt: time.Now(),
         }
-        
+
         if err := tx.Create(payment).Error; err != nil {
             return fmt.Errorf("创建支付记录失败: %w", err)
         }
-        
-        logger.Info("订单创建成功", 
+
+        logger.Info("订单创建成功",
             clog.String("order_id", order.ID),
             clog.String("user_id", req.UserID))
-        
+
         return nil
     })
-    
+
     if err != nil {
         return nil, err
     }
-    
+
     return order, nil
 }
 ```
@@ -500,13 +500,13 @@ func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest)
 ```go
 func (s *OrderService) GetUserOrders(ctx context.Context, userID string, page, pageSize int) ([]*Order, int64, error) {
     logger := clog.WithContext(ctx)
-    
+
     // 计算分页偏移量
     offset := (page - 1) * pageSize
-    
+
     var orders []*Order
     var total int64
-    
+
     // 在分片表中查询用户订单
     if err := s.db.DB(ctx).Model(&Order{}).
         Where("user_id = ?", userID).
@@ -514,7 +514,7 @@ func (s *OrderService) GetUserOrders(ctx context.Context, userID string, page, p
         logger.Error("查询订单总数失败", clog.Err(err))
         return nil, 0, fmt.Errorf("查询订单失败: %w", err)
     }
-    
+
     if err := s.db.DB(ctx).Where("user_id = ?", userID).
         Order("created_at DESC").
         Offset(offset).
@@ -523,12 +523,12 @@ func (s *OrderService) GetUserOrders(ctx context.Context, userID string, page, p
         logger.Error("查询订单列表失败", clog.Err(err))
         return nil, 0, fmt.Errorf("查询订单失败: %w", err)
     }
-    
-    logger.Info("查询用户订单成功", 
+
+    logger.Info("查询用户订单成功",
         clog.String("user_id", userID),
         clog.Int64("total", total),
         clog.Int("count", len(orders)))
-    
+
     return orders, total, nil
 }
 ```
@@ -538,20 +538,20 @@ func (s *OrderService) GetUserOrders(ctx context.Context, userID string, page, p
 ```go
 func (s *UserService) BatchUpdateUsers(ctx context.Context, updates []*UserUpdate) error {
     logger := clog.WithContext(ctx)
-    
+
     // 使用事务进行批量更新
     return s.db.Transaction(ctx, func(tx *gorm.DB) error {
         for _, update := range updates {
             if err := tx.Model(&User{}).
                 Where("id = ?", update.ID).
                 Updates(update).Error; err != nil {
-                logger.Error("批量更新用户失败", 
+                logger.Error("批量更新用户失败",
                     clog.String("user_id", update.ID),
                     clog.Err(err))
                 return err
             }
         }
-        
+
         logger.Info("批量更新用户成功", clog.Int("count", len(updates)))
         return nil
     })
@@ -567,14 +567,14 @@ func (p *dbProvider) watchConfigChanges(ctx context.Context) {
     if p.coord == nil {
         return
     }
-    
+
     configPath := "/config/db/"
     watcher, err := p.coord.Config().WatchPrefix(ctx, configPath, &p.config)
     if err != nil {
         p.logger.Error("监听数据库配置失败", clog.Err(err))
         return
     }
-    
+
     go func() {
         for range watcher.Changes() {
             p.updateConnection()
@@ -588,17 +588,17 @@ func (p *dbProvider) updateConnection() {
     if newConfig == nil {
         return
     }
-    
+
     // 更新连接池配置
     sqlDB, err := p.db.DB()
     if err != nil {
         return
     }
-    
+
     sqlDB.SetMaxOpenConns(newConfig.MaxOpenConns)
     sqlDB.SetMaxIdleConns(newConfig.MaxIdleConns)
     sqlDB.SetConnMaxLifetime(newConfig.ConnMaxLifetime)
-    
+
     p.logger.Info("数据库配置已更新")
 }
 ```
@@ -642,29 +642,29 @@ func (p *dbProvider) checkConnectionPool() error {
     if p.db == nil {
         return fmt.Errorf("数据库未初始化")
     }
-    
+
     sqlDB, err := p.db.DB()
     if err != nil {
         return fmt.Errorf("获取数据库连接失败: %w", err)
     }
-    
+
     stats := sqlDB.Stats()
-    
+
     // 检查连接数是否合理
     if stats.OpenConnections > p.config.MaxOpenConns {
         return fmt.Errorf("连接数超过限制: %d > %d", stats.OpenConnections, p.config.MaxOpenConns)
     }
-    
+
     // 检查等待数量
     if stats.WaitCount > 1000 {
         return fmt.Errorf("连接等待次数过多: %d", stats.WaitCount)
     }
-    
+
     // 检查平均等待时间
     if stats.WaitDuration > 5*time.Second {
         return fmt.Errorf("连接等待时间过长: %v", stats.WaitDuration)
     }
-    
+
     return nil
 }
 ```

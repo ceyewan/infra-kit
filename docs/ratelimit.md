@@ -21,7 +21,7 @@ type Provider interface {
     // ruleName: 要应用的规则名
     // 返回值: bool-是否允许，error-错误信息
     Allow(ctx context.Context, resource, ruleName string) (bool, error)
-    
+
     // Close 关闭限流器，释放资源
     Close() error
 }
@@ -34,19 +34,19 @@ type Provider interface {
 type Config struct {
     // Mode 限流模式：local 或 distributed
     Mode string `json:"mode"`
-    
+
     // ServiceName 服务名称，用于日志和监控
     ServiceName string `json:"serviceName"`
-    
+
     // RulesPath 限流规则在配置中心的路径
     RulesPath string `json:"rulesPath"`
-    
+
     // DefaultMode 默认限流模式
     DefaultMode string `json:"defaultMode"`
-    
+
     // LocalConfig 单机限流配置
     LocalConfig LocalConfig `json:"localConfig"`
-    
+
     // DistributedConfig 分布式限流配置
     DistributedConfig DistributedConfig `json:"distributedConfig"`
 }
@@ -55,10 +55,10 @@ type Config struct {
 type LocalConfig struct {
     // DefaultRate 默认令牌生成速率（每秒）
     DefaultRate float64 `json:"defaultRate"`
-    
+
     // DefaultCapacity 默认令牌桶容量
     DefaultCapacity int64 `json:"defaultCapacity"`
-    
+
     // CleanupInterval 清理间隔（秒）
     CleanupInterval int64 `json:"cleanupInterval"`
 }
@@ -67,13 +67,13 @@ type LocalConfig struct {
 type DistributedConfig struct {
     // DefaultRate 默认令牌生成速率（每秒）
     DefaultRate float64 `json:"defaultRate"`
-    
+
     // DefaultCapacity 默认令牌桶容量
     DefaultCapacity int64 `json:"defaultCapacity"`
-    
+
     // RedisKeyPrefix Redis键前缀
     RedisKeyPrefix string `json:"redisKeyPrefix"`
-    
+
     // ScriptLua Lua脚本内容
     ScriptLua string `json:"scriptLua"`
 }
@@ -82,16 +82,16 @@ type DistributedConfig struct {
 type Rule struct {
     // Mode 限流模式
     Mode string `json:"mode"`
-    
+
     // Rate 令牌生成速率（每秒）
     Rate float64 `json:"rate"`
-    
+
     // Capacity 令牌桶容量
     Capacity int64 `json:"capacity"`
-    
+
     // Description 规则描述
     Description string `json:"description"`
-    
+
     // KeyFormat 键格式模板
     KeyFormat string `json:"keyFormat"`
 }
@@ -224,7 +224,7 @@ config := &Config{
 // 监控指标
 metrics := map[string]string{
     "requests_total":     "总请求数",
-    "allowed_total":      "通过请求数", 
+    "allowed_total":      "通过请求数",
     "limited_total":      "被限流请求数",
     "current_tokens":     "当前令牌数",
     "rule_updates":       "规则更新次数",
@@ -242,39 +242,39 @@ import (
     "context"
     "fmt"
     "time"
-    
-    "github.com/gochat-kit/ratelimit"
-    "github.com/gochat-kit/clog"
-    "github.com/gochat-kit/coord"
-    "github.com/gochat-kit/cache"
+
+    "github.com/infra-kit/ratelimit"
+    "github.com/infra-kit/clog"
+    "github.com/infra-kit/coord"
+    "github.com/infra-kit/cache"
 )
 
 func main() {
     ctx := context.Background()
-    
+
     // 初始化依赖组件
     logger := clog.New(ctx, &clog.Config{})
     coordProvider := coord.New(ctx, &coord.Config{})
     cacheProvider := cache.New(ctx, &cache.Config{})
-    
+
     // 获取默认配置
     config := ratelimit.GetDefaultConfig("production")
     config.ServiceName = "message-service"
     config.RulesPath = "/config/prod/message-service/ratelimit/"
-    
+
     // 创建限流Provider
     opts := []ratelimit.Option{
         ratelimit.WithLogger(logger),
         ratelimit.WithCoordProvider(coordProvider),
         ratelimit.WithCacheProvider(cacheProvider),
     }
-    
+
     limiter, err := ratelimit.New(ctx, config, opts...)
     if err != nil {
         logger.Fatal("创建限流器失败", clog.Err(err))
     }
     defer limiter.Close()
-    
+
     // 使用限流器
     userID := "user123"
     for i := 0; i < 10; i++ {
@@ -283,7 +283,7 @@ func main() {
             logger.Error("限流检查失败", clog.Err(err))
             continue
         }
-        
+
         if allowed {
             logger.Info("请求通过限流检查")
             // 执行业务逻辑
@@ -291,7 +291,7 @@ func main() {
             logger.Warn("请求被限流")
             // 返回限流错误
         }
-        
+
         time.Sleep(100 * time.Millisecond)
     }
 }
@@ -305,20 +305,20 @@ package middleware
 import (
     "context"
     "net/http"
-    
+
     "github.com/gin-gonic/gin"
-    "github.com/gochat-kit/ratelimit"
-    "github.com/gochat-kit/clog"
+    "github.com/infra-kit/ratelimit"
+    "github.com/infra-kit/clog"
 )
 
 func RateLimitMiddleware(limiter ratelimit.Provider) gin.HandlerFunc {
     return func(c *gin.Context) {
         ctx := c.Request.Context()
-        
+
         // 构建限流键
         resource := buildResourceKey(c)
         ruleName := getRuleName(c)
-        
+
         // 检查限流
         allowed, err := limiter.Allow(ctx, resource, ruleName)
         if err != nil {
@@ -326,14 +326,14 @@ func RateLimitMiddleware(limiter ratelimit.Provider) gin.HandlerFunc {
             c.Next() // 降级：限流器异常时放行
             return
         }
-        
+
         if !allowed {
             c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
                 "error": "请求过于频繁，请稍后再试",
             })
             return
         }
-        
+
         c.Next()
     }
 }

@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-本指南详细介绍如何为 `gochat-kit` 中的每个组件创建独立的 Go 模块，实现组件的模块化管理和独立发布。
+本指南详细介绍如何为 `infra-kit` 中的每个组件创建独立的 Go 模块，实现组件的模块化管理和独立发布。
 
 ### 模块化目标
 
@@ -283,10 +283,10 @@ import (
 func TestLoggerInitialization(t *testing.T) {
     config := GetDefaultConfig("test")
     logger, err := New(context.Background(), config)
-    
+
     assert.NoError(t, err)
     assert.NotNil(t, logger)
-    
+
     logger.Info("Test message", String("key", "value"))
 }
 ```
@@ -336,12 +336,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      
+
       - name: Setup Go
         uses: actions/setup-go@v3
         with:
           go-version: 1.21
-      
+
       - name: Release components
         run: |
           for component in clog cache uid coord db mq ratelimit once breaker es metrics; do
@@ -386,25 +386,25 @@ import (
 
 func main() {
     ctx := context.Background()
-    
+
     // 初始化日志
-    clog.Init(ctx, clog.GetDefaultConfig("production"), 
+    clog.Init(ctx, clog.GetDefaultConfig("production"),
         clog.WithNamespace("my-service"))
-    
+
     // 初始化缓存
     cacheProvider, err := cache.New(ctx, cache.GetDefaultConfig("production"),
         cache.WithLogger(clog.Namespace("cache")))
     if err != nil {
         panic(err)
     }
-    
+
     // 初始化 UID 生成器
     uidProvider, err := uid.New(ctx, uid.GetDefaultConfig("production"),
         uid.WithLogger(clog.Namespace("uid")))
     if err != nil {
         panic(err)
     }
-    
+
     // 使用组件...
 }
 ```

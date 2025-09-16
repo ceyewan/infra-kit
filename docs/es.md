@@ -20,34 +20,34 @@ ES 组件实现了基于 Provider 模式的 Elasticsearch 客户端，支持泛�
 type Provider interface {
     // BulkIndex 批量索引文档
     BulkIndex[T Indexable](ctx context.Context, items []T) error
-    
+
     // SearchGlobal 全局搜索
     SearchGlobal[T Indexable](ctx context.Context, operatorID string, keyword string, page, size int) (*SearchResult[T], error)
-    
+
     // SearchInSession 会话内搜索
     SearchInSession[T Indexable](ctx context.Context, operatorID, sessionID, keyword string, page, size int) (*SearchResult[T], error)
-    
+
     // SearchByQuery 自定义查询搜索
     SearchByQuery[T Indexable](ctx context.Context, query Query, page, size int) (*SearchResult[T], error)
-    
+
     // UpdateDocument 更新文档
     UpdateDocument[T Indexable](ctx context.Context, item T) error
-    
+
     // DeleteDocument 删除文档
     DeleteDocument(ctx context.Context, id string) error
-    
+
     // CreateIndex 创建索引
     CreateIndex(ctx context.Context, indexConfig IndexConfig) error
-    
+
     // DeleteIndex 删除索引
     DeleteIndex(ctx context.Context, indexName string) error
-    
+
     // IndexExists 检查索引是否存在
     IndexExists(ctx context.Context, indexName string) (bool, error)
-    
+
     // GetDocument 获取文档
     GetDocument[T Indexable](ctx context.Context, id string) (T, error)
-    
+
     // Close 关闭客户端连接
     Close() error
 }
@@ -72,16 +72,16 @@ type SearchResult[T Indexable] struct {
 type Query struct {
     // 查询语句
     Query string `json:"query"`
-    
+
     // 过滤条件
     Filter map[string]interface{} `json:"filter"`
-    
+
     // 排序条件
     Sort []SortField `json:"sort"`
-    
+
     // 聚合条件
     Aggregations map[string]Aggregation `json:"aggregations"`
-    
+
     // 高亮配置
     Highlight Highlight `json:"highlight"`
 }
@@ -102,28 +102,28 @@ type IndexConfig struct {
 type Config struct {
     // Addresses ES集群地址
     Addresses []string `json:"addresses"`
-    
+
     // Username 用户名
     Username string `json:"username"`
-    
+
     // Password 密码
     Password string `json:"password"`
-    
+
     // DefaultIndex 默认索引名
     DefaultIndex string `json:"defaultIndex"`
-    
+
     // Timeout 操作超时时间
     Timeout time.Duration `json:"timeout"`
-    
+
     // MaxRetries 最大重试次数
     MaxRetries int `json:"maxRetries"`
-    
+
     // Sniff 是否启用节点发现
     Sniff bool `json:"sniff"`
-    
+
     // BulkConfig 批量操作配置
     BulkConfig BulkConfig `json:"bulkConfig"`
-    
+
     // IndexConfigs 索引配置
     IndexConfigs map[string]IndexConfig `json:"indexConfigs"`
 }
@@ -132,16 +132,16 @@ type Config struct {
 type BulkConfig struct {
     // Workers 工作协程数
     Workers int `json:"workers"`
-    
+
     // FlushBytes 刷新字节数
     FlushBytes int `json:"flushBytes"`
-    
+
     // FlushInterval 刷新间隔
     FlushInterval time.Duration `json:"flushInterval"`
-    
+
     // MaxRetries 最大重试次数
     MaxRetries int `json:"maxRetries"`
-    
+
     // CompressRequest 是否压缩请求
     CompressRequest bool `json:"compressRequest"`
 }
@@ -319,9 +319,9 @@ package main
 import (
     "context"
     "time"
-    
-    "github.com/gochat-kit/es"
-    "github.com/gochat-kit/clog"
+
+    "github.com/infra-kit/es"
+    "github.com/infra-kit/clog"
 )
 
 // 定义文档结构
@@ -340,38 +340,38 @@ func (m *Message) GetID() string {
 
 func main() {
     ctx := context.Background()
-    
+
     // 初始化依赖组件
     logger := clog.New(ctx, &clog.Config{})
-    
+
     // 获取默认配置
     config := es.GetDefaultConfig("production")
     config.Addresses = []string{"http://localhost:9200"}
     config.DefaultIndex = "messages"
-    
+
     // 创建ES Provider
     opts := []es.Option{
         es.WithLogger(logger),
         es.WithTimeout(10 * time.Second),
     }
-    
+
     esProvider, err := es.New(ctx, config, opts...)
     if err != nil {
         logger.Fatal("创建ES Provider失败", clog.Err(err))
     }
     defer esProvider.Close()
-    
+
     // 批量索引文档
     messages := []*Message{
         {ID: "1", SessionID: "s1", SenderID: "u1", Content: "Hello", Timestamp: time.Now()},
         {ID: "2", SessionID: "s1", SenderID: "u2", Content: "World", Timestamp: time.Now()},
     }
-    
+
     err = esProvider.BulkIndex(ctx, messages)
     if err != nil {
         logger.Error("批量索引失败", clog.Err(err))
     }
-    
+
     // 搜索文档
     result, err := esProvider.SearchGlobal[Message](ctx, "u1", "Hello", 1, 10)
     if err != nil {
@@ -389,9 +389,9 @@ package search
 
 import (
     "context"
-    
-    "github.com/gochat-kit/es"
-    "github.com/gochat-kit/clog"
+
+    "github.com/infra-kit/es"
+    "github.com/infra-kit/clog"
 )
 
 type SearchService struct {
@@ -426,14 +426,14 @@ func (s *SearchService) AdvancedSearch(ctx context.Context, req *SearchRequest) 
             PostTags: "</em>",
         },
     }
-    
+
     // 执行搜索
     result, err := s.esProvider.SearchByQuery[Document](ctx, query, req.Page, req.Size)
     if err != nil {
         s.logger.Error("高级搜索失败", clog.Err(err))
         return nil, err
     }
-    
+
     // 转换结果
     response := &SearchResponse{
         Total:      result.Total,
@@ -443,11 +443,11 @@ func (s *SearchService) AdvancedSearch(ctx context.Context, req *SearchRequest) 
         Took:       result.Took,
         Documents:  make([]*Document, len(result.Hits)),
     }
-    
+
     for i, doc := range result.Hits {
         response.Documents[i] = doc
     }
-    
+
     return response, nil
 }
 ```
@@ -459,9 +459,9 @@ package admin
 
 import (
     "context"
-    
-    "github.com/gochat-kit/es"
-    "github.com/gochat-kit/clog"
+
+    "github.com/infra-kit/es"
+    "github.com/infra-kit/clog"
 )
 
 type IndexAdmin struct {
@@ -506,7 +506,7 @@ func (a *IndexAdmin) CreateMessageIndex(ctx context.Context) error {
             "number_of_replicas": 1,
         },
     }
-    
+
     return a.esProvider.CreateIndex(ctx, indexConfig)
 }
 

@@ -1,6 +1,6 @@
-# gochat-kit: 现代化 Go 微服务基础设施组件库
+# infra-kit: 现代化 Go 微服务基础设施组件库
 
-`gochat-kit` 是一个为构建现代化 Go 微服务而设计的高性能、可扩展基础设施组件库。它提供了一套经过生产验证的、遵循统一设计规范的基础设施组件，让开发者可以专注于业务逻辑创新，而非重复搭建底层设施。
+`infra-kit` 是一个为构建现代化 Go 微服务而设计的高性能、可扩展基础设施组件库。它提供了一套经过生产验证的、遵循统一设计规范的基础设施组件，让开发者可以专注于业务逻辑创新，而非重复搭建底层设施。
 
 ## 🎯 项目愿景 (Vision)
 
@@ -10,7 +10,7 @@
 - 缺乏生产级的可靠性保障
 - 可观测性和服务治理能力不足
 
-`gochat-kit` 旨在解决这些痛点，提供一个：
+`infra-kit` 旨在解决这些痛点，提供一个：
 - **生产级可靠**：每个组件都经过生产环境验证，具备高可用性和高性能
 - **架构一致**：所有组件遵循统一的设计规范和接口契约
 - **易于集成**：标准化接口和依赖注入，降低集成复杂度
@@ -159,12 +159,12 @@ func GetDefaultConfig(env string) *Config
 **使用场景**：
 ```go
 // 初始化
-clog.Init(ctx, clog.GetDefaultConfig("production"), 
+clog.Init(ctx, clog.GetDefaultConfig("production"),
     clog.WithNamespace("my-service"))
 
 // 业务代码中使用
 logger := clog.WithContext(ctx)
-logger.Info("处理用户请求", 
+logger.Info("处理用户请求",
     clog.String("user_id", userID),
     clog.String("operation", "create_profile"))
 ```
@@ -180,7 +180,7 @@ logger.Info("处理用户请求",
 **使用场景**：
 ```go
 // 初始化
-coordProvider, _ := coord.New(ctx, coordConfig, 
+coordProvider, _ := coord.New(ctx, coordConfig,
     coord.WithLogger(clog.Namespace("coord")))
 
 // 服务注册
@@ -299,22 +299,22 @@ result, err := onceProvider.Execute(ctx, "doc:create:xyz", 48*time.Hour, func() 
 ```go
 func main() {
     // 阶段 0：基础组件
-    clog.Init(ctx, clog.GetDefaultConfig("production"), 
+    clog.Init(ctx, clog.GetDefaultConfig("production"),
         clog.WithNamespace("my-service"))
-    
+
     // 阶段 1：核心基础设施
     coordProvider, _ := coord.New(ctx, coordConfig,
         coord.WithLogger(clog.Namespace("coord")))
-    
+
     cacheProvider, _ := cache.New(ctx, cacheConfig,
         cache.WithLogger(clog.Namespace("cache")),
         cache.WithCoordProvider(coordProvider))
-    
+
     // 阶段 2：服务治理
     rateLimitProvider, _ := ratelimit.New(ctx, rateLimitConfig,
         ratelimit.WithCoordProvider(coordProvider),
         ratelimit.WithCacheProvider(cacheProvider))
-    
+
     // 启动应用服务
     service := NewMyService(coordProvider, cacheProvider, rateLimitProvider)
     service.Run()
@@ -330,17 +330,17 @@ package main
 
 import (
     "context"
-    "github.com/ceyewan/gochat-kit/clog"
-    "github.com/ceyewan/gochat-kit/cache"
+    "github.com/ceyewan/infra-kit/clog"
+    "github.com/ceyewan/infra-kit/cache"
 )
 
 func main() {
     ctx := context.Background()
-    
+
     // 1. 初始化日志
-    clog.Init(ctx, clog.GetDefaultConfig("development"), 
+    clog.Init(ctx, clog.GetDefaultConfig("development"),
         clog.WithNamespace("demo"))
-    
+
     // 2. 初始化缓存
     cacheProvider, err := cache.New(ctx, cache.GetDefaultConfig("development"),
         cache.WithLogger(clog.Namespace("cache")))
@@ -348,13 +348,13 @@ func main() {
         clog.Fatal("缓存初始化失败", clog.Err(err))
     }
     defer cacheProvider.Close()
-    
+
     // 3. 使用组件
     err = cacheProvider.String().Set(ctx, "hello", "world", time.Hour)
     if err != nil {
         clog.Error("设置缓存失败", clog.Err(err))
     }
-    
+
     value, err := cacheProvider.String().Get(ctx, "hello")
     if err == nil {
         clog.Info("缓存值", clog.String("value", value))

@@ -2,7 +2,7 @@
 
 ## 1. 设计理念
 
-`mq` 是 `gochat-kit` 项目的消息队列组件，基于 `Kafka` 构建。它为微服务架构提供了统一、可靠的消息传递解决方案。
+`mq` 是 `infra-kit` 项目的消息队列组件，基于 `Kafka` 构建。它为微服务架构提供了统一、可靠的消息传递解决方案。
 
 ### 核心设计原则
 
@@ -193,11 +193,11 @@ func (p *kafkaProducer) Send(ctx context.Context, msg *Message, callback func(*M
     if msg.Headers == nil {
         msg.Headers = make(map[string][]byte)
     }
-    
+
     if traceID := getTraceID(ctx); traceID != "" {
         msg.Headers["X-Trace-ID"] = []byte(traceID)
     }
-    
+
     // 创建 Kafka 消息
     kafkaMsg := &sarama.ProducerMessage{
         Topic:   msg.Topic,
@@ -205,7 +205,7 @@ func (p *kafkaProducer) Send(ctx context.Context, msg *Message, callback func(*M
         Value:   sarama.ByteEncoder(msg.Value),
         Headers: convertHeaders(msg.Headers),
     }
-    
+
     // 异步发送
     p.asyncProd.SendMessage(kafkaMsg, func(message *sarama.ProducerMessage, err error) {
         ack := &MessageAck{
@@ -214,48 +214,48 @@ func (p *kafkaProducer) Send(ctx context.Context, msg *Message, callback func(*M
             Offset:    message.Offset,
             Timestamp: time.Now(),
         }
-        
+
         if err != nil {
             ack.Error = err
             p.incrementError()
         } else {
             p.incrementSuccess(message)
         }
-        
+
         callback(ack)
     })
-    
+
     return nil
 }
 
 func (p *kafkaProducer) SendSync(ctx context.Context, msg *Message) (*MessageAck, error) {
     startTime := time.Now()
-    
+
     // 添加 trace_id
     if msg.Headers == nil {
         msg.Headers = make(map[string][]byte)
     }
-    
+
     if traceID := getTraceID(ctx); traceID != "" {
         msg.Headers["X-Trace-ID"] = []byte(traceID)
     }
-    
+
     kafkaMsg := &sarama.ProducerMessage{
         Topic:   msg.Topic,
         Key:     sarama.ByteEncoder(msg.Key),
         Value:   sarama.ByteEncoder(msg.Value),
         Headers: convertHeaders(msg.Headers),
     }
-    
+
     // 同步发送
     partition, offset, err := p.producer.SendMessage(kafkaMsg)
     if err != nil {
         p.incrementError()
         return nil, err
     }
-    
+
     p.incrementSuccess(kafkaMsg)
-    
+
     return &MessageAck{
         Topic:     msg.Topic,
         Partition: partition,
@@ -292,9 +292,9 @@ func (h *consumerHandler) ConsumeClaim(session sarama.ConsumerGroupSession, clai
             if !ok {
                 return nil
             }
-            
+
             startTime := time.Now()
-            
+
             // 构造消息对象
             message := &Message{
                 Topic:   msg.Topic,
@@ -303,16 +303,16 @@ func (h *consumerHandler) ConsumeClaim(session sarama.ConsumerGroupSession, clai
                 Headers: convertKafkaHeaders(msg.Headers),
                 Time:    msg.Timestamp,
             }
-            
+
             // 从消息头提取 trace_id
             ctx := context.Background()
             if traceID := getTraceIDFromHeaders(msg.Headers); traceID != "" {
                 ctx = clog.WithTraceID(ctx, traceID)
             }
-            
+
             // 处理消息
             err := h.handler(ctx, message)
-            
+
             // 更新统计信息
             processTime := time.Since(startTime)
             h.stats.mu.Lock()
@@ -322,17 +322,17 @@ func (h *consumerHandler) ConsumeClaim(session sarama.ConsumerGroupSession, clai
                 (int64(h.stats.AverageProcessTime)*(h.stats.MessagesConsumed-1) + int64(processTime)) /
                 h.stats.MessagesConsumed,
             )
-            
+
             if err != nil {
                 h.stats.ProcessingErrors++
             }
             h.stats.mu.Unlock()
-            
+
             // 手动提交偏移量（如果配置为手动提交）
             if err == nil {
                 session.MarkMessage(msg, "")
             }
-            
+
         case <-session.Context().Done():
             return nil
         }
@@ -345,7 +345,7 @@ func (h *consumerHandler) ConsumeClaim(session sarama.ConsumerGroupSession, clai
 ```go
 func (p *kafkaProducer) setupConfig(config *Config) *sarama.Config {
     saramaConfig := sarama.NewConfig()
-    
+
     // 生产者配置
     saramaConfig.Producer.RequiredAcks = sarama.RequiredAcks(config.ProducerConfig.Acks)
     saramaConfig.Producer.Retry.Max = config.ProducerConfig.RetryMax
@@ -353,7 +353,7 @@ func (p *kafkaProducer) setupConfig(config *Config) *sarama.Config {
     saramaConfig.Producer.Flush.MaxMessages = config.ProducerConfig.BatchSize
     saramaConfig.Producer.Flush.Frequency = time.Duration(config.ProducerConfig.LingerMs) * time.Millisecond
     saramaConfig.Producer.Compression = sarama.CompressionCodec(config.ProducerConfig.Compression)
-    
+
     // 消费者配置
     saramaConfig.Consumer.Offsets.Initial = sarama.OffsetNewest
     if config.ConsumerConfig.AutoOffsetReset == "earliest" {
@@ -363,7 +363,7 @@ func (p *kafkaProducer) setupConfig(config *Config) *sarama.Config {
     saramaConfig.Consumer.Offsets.AutoCommit.Interval = time.Duration(config.ConsumerConfig.AutoCommitIntervalMs) * time.Millisecond
     saramaConfig.Consumer.Group.Session.Timeout = time.Duration(config.ConsumerConfig.SessionTimeoutMs) * time.Millisecond
     saramaConfig.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
-    
+
     // 安全配置
     if config.SecurityProtocol != "PLAINTEXT" {
         saramaConfig.Net.SASL.Enable = true
@@ -371,7 +371,7 @@ func (p *kafkaProducer) setupConfig(config *Config) *sarama.Config {
         saramaConfig.Net.SASL.User = config.SASLUsername
         saramaConfig.Net.SASL.Password = config.SASLPassword
     }
-    
+
     return saramaConfig
 }
 
@@ -379,14 +379,14 @@ func (p *kafkaProducer) watchConfigChanges(ctx context.Context) {
     if p.coord == nil {
         return
     }
-    
+
     configPath := "/config/mq/"
     watcher, err := p.coord.Config().WatchPrefix(ctx, configPath, &p.config)
     if err != nil {
         p.logger.Error("监听 MQ 配置失败", clog.Err(err))
         return
     }
-    
+
     go func() {
         for range watcher.Changes() {
             p.updateConfig()
@@ -401,7 +401,7 @@ func (p *kafkaProducer) watchConfigChanges(ctx context.Context) {
 func (p *kafkaProducer) startMetricsCollection(ctx context.Context) {
     ticker := time.NewTicker(30 * time.Second)
     defer ticker.Stop()
-    
+
     for {
         select {
         case <-ctx.Done():
@@ -415,7 +415,7 @@ func (p *kafkaProducer) startMetricsCollection(ctx context.Context) {
 func (p *kafkaProducer) reportMetrics() {
     p.statsMu.RLock()
     defer p.statsMu.RUnlock()
-    
+
     if p.metrics != nil {
         p.metrics.Gauge("mq.producer.messages_sent", float64(p.stats.MessagesSent))
         p.metrics.Gauge("mq.producer.bytes_sent", float64(p.stats.BytesSent))
@@ -434,12 +434,12 @@ func (p *kafkaProducer) reportMetrics() {
 ```go
 func main() {
     ctx := context.Background()
-    
+
     // 1. 初始化 MQ 组件
     config := mq.GetDefaultConfig("production")
     config.Brokers = []string{"kafka1:9092", "kafka2:9092", "kafka3:9092"}
     config.SecurityProtocol = "SASL_SSL"
-    
+
     // 生产者配置
     config.ProducerConfig = &mq.ProducerConfig{
         Acks:        -1,   // 等待所有副本确认
@@ -448,7 +448,7 @@ func main() {
         LingerMs:    10,   // 延迟发送时间
         Compression: 2,    // 使用 gzip 压缩
     }
-    
+
     // 消费者配置
     config.ConsumerConfig = &mq.ConsumerConfig{
         AutoOffsetReset:      "earliest",
@@ -458,7 +458,7 @@ func main() {
         MaxPollRecords:       500,
         MaxPollIntervalMs:    300000,
     }
-    
+
     // 创建生产者
     producer, err := mq.NewProducer(ctx, config,
         mq.WithLogger(clog.Namespace("mq-producer")),
@@ -469,7 +469,7 @@ func main() {
         log.Fatal("创建 MQ 生产者失败:", err)
     }
     defer producer.Close()
-    
+
     // 创建消费者
     consumer, err := mq.NewConsumer(ctx, config, "user-service-group",
         mq.WithLogger(clog.Namespace("mq-consumer")),
@@ -490,7 +490,7 @@ type UserService struct {
 
 func (s *UserService) UserRegistered(ctx context.Context, user *User) error {
     logger := clog.WithContext(ctx)
-    
+
     // 构造事件消息
     event := &UserRegisteredEvent{
         UserID:    user.ID,
@@ -498,12 +498,12 @@ func (s *UserService) UserRegistered(ctx context.Context, user *User) error {
         Email:     user.Email,
         Timestamp: time.Now(),
     }
-    
+
     eventData, err := json.Marshal(event)
     if err != nil {
         return fmt.Errorf("序列化事件失败: %w", err)
     }
-    
+
     message := &mq.Message{
         Topic: "user-events.registered",
         Key:   []byte(user.ID),
@@ -513,25 +513,25 @@ func (s *UserService) UserRegistered(ctx context.Context, user *User) error {
             "Version":    []byte("1.0"),
         },
     }
-    
+
     // 异步发送消息
     err = s.producer.Send(ctx, message, func(ack *mq.MessageAck) {
         if ack.Error != nil {
-            logger.Error("发送用户注册事件失败", 
+            logger.Error("发送用户注册事件失败",
                 clog.String("user_id", user.ID),
                 clog.Err(ack.Error))
         } else {
-            logger.Info("用户注册事件发送成功", 
+            logger.Info("用户注册事件发送成功",
                 clog.String("user_id", user.ID),
                 clog.Int32("partition", ack.Partition),
                 clog.Int64("offset", ack.Offset))
         }
     })
-    
+
     if err != nil {
         return fmt.Errorf("发送消息失败: %w", err)
     }
-    
+
     return nil
 }
 ```
@@ -545,31 +545,31 @@ type NotificationService struct {
 
 func (s *NotificationService) Start(ctx context.Context) error {
     logger := clog.WithContext(ctx)
-    
+
     // 订阅用户事件主题
     topics := []string{
         "user-events.registered",
         "user-events.updated",
         "user-events.deleted",
     }
-    
+
     handler := func(ctx context.Context, msg *mq.Message) error {
         // 处理消息
         return s.handleUserEvent(ctx, msg)
     }
-    
+
     // 启动消费者
     if err := s.consumer.Subscribe(ctx, topics, handler); err != nil {
         return fmt.Errorf("订阅主题失败: %w", err)
     }
-    
+
     logger.Info("消息消费者启动成功", clog.Strings("topics", topics))
     return nil
 }
 
 func (s *NotificationService) handleUserEvent(ctx context.Context, msg *mq.Message) error {
     logger := clog.WithContext(ctx)
-    
+
     // 根据主题处理不同事件
     switch msg.Topic {
     case "user-events.registered":
@@ -586,31 +586,31 @@ func (s *NotificationService) handleUserEvent(ctx context.Context, msg *mq.Messa
 
 func (s *NotificationService) handleUserRegistered(ctx context.Context, msg *mq.Message) error {
     logger := clog.WithContext(ctx)
-    
+
     var event UserRegisteredEvent
     if err := json.Unmarshal(msg.Value, &event); err != nil {
         logger.Error("解析用户注册事件失败", clog.Err(err))
         return err
     }
-    
-    logger.Info("处理用户注册事件", 
+
+    logger.Info("处理用户注册事件",
         clog.String("user_id", event.UserID),
         clog.String("username", event.Username))
-    
+
     // 发送欢迎邮件
     if err := s.sendWelcomeEmail(ctx, event); err != nil {
-        logger.Error("发送欢迎邮件失败", 
+        logger.Error("发送欢迎邮件失败",
             clog.String("user_id", event.UserID),
             clog.Err(err))
         return err
     }
-    
+
     // 提交偏移量
     if err := s.consumer.Commit(ctx); err != nil {
         logger.Error("提交偏移量失败", clog.Err(err))
         return err
     }
-    
+
     return nil
 }
 ```
@@ -620,33 +620,33 @@ func (s *NotificationService) handleUserRegistered(ctx context.Context, msg *mq.
 ```go
 func (s *MessageService) BatchSendMessages(ctx context.Context, messages []*Message) error {
     logger := clog.WithContext(ctx)
-    
+
     // 批量发送消息
     err := s.producer.SendBatch(ctx, messages, func(acks []*mq.MessageAck) {
         successCount := 0
         errorCount := 0
-        
+
         for _, ack := range acks {
             if ack.Error != nil {
                 errorCount++
-                logger.Error("消息发送失败", 
+                logger.Error("消息发送失败",
                     clog.String("topic", ack.Topic),
                     clog.Err(ack.Error))
             } else {
                 successCount++
             }
         }
-        
-        logger.Info("批量消息发送完成", 
+
+        logger.Info("批量消息发送完成",
             clog.Int("total", len(messages)),
             clog.Int("success", successCount),
             clog.Int("errors", errorCount))
     })
-    
+
     if err != nil {
         return fmt.Errorf("批量发送消息失败: %w", err)
     }
-    
+
     return nil
 }
 ```
@@ -663,7 +663,7 @@ func (s *OrderService) CreateOrderWithTransaction(ctx context.Context, order *Or
         if err := tx.Create(order).Error; err != nil {
             return fmt.Errorf("创建订单失败: %w", err)
         }
-        
+
         // 2. 发送订单创建事件
         event := &OrderCreatedEvent{
             OrderID:  order.ID,
@@ -671,20 +671,20 @@ func (s *OrderService) CreateOrderWithTransaction(ctx context.Context, order *Or
             Amount:   order.Amount,
             Status:   order.Status,
         }
-        
+
         eventData, _ := json.Marshal(event)
         message := &mq.Message{
             Topic: "order-events.created",
             Key:   []byte(order.ID),
             Value: eventData,
         }
-        
+
         // 使用同步发送确保消息发送成功
         ack, err := s.producer.SendSync(ctx, message)
         if err != nil {
             return fmt.Errorf("发送订单事件失败: %w", err)
         }
-        
+
         // 记录消息偏移量
         if err := tx.Create(&MessageLog{
             OrderID:   order.ID,
@@ -695,10 +695,10 @@ func (s *OrderService) CreateOrderWithTransaction(ctx context.Context, order *Or
         }).Error; err != nil {
             return fmt.Errorf("记录消息日志失败: %w", err)
         }
-        
+
         return nil
     })
-    
+
     return err
 }
 ```
@@ -708,32 +708,32 @@ func (s *OrderService) CreateOrderWithTransaction(ctx context.Context, order *Or
 ```go
 func (s *PaymentService) handlePaymentMessage(ctx context.Context, msg *mq.Message) error {
     logger := clog.WithContext(ctx)
-    
+
     var payment Payment
     if err := json.Unmarshal(msg.Value, &payment); err != nil {
         return fmt.Errorf("解析支付消息失败: %w", err)
     }
-    
+
     // 获取重试次数
     retryCount := getRetryCountFromHeaders(msg.Headers)
-    
+
     // 处理支付
     err := s.processPayment(ctx, &payment)
     if err != nil {
-        logger.Error("支付处理失败", 
+        logger.Error("支付处理失败",
             clog.String("payment_id", payment.ID),
             clog.Int("retry_count", retryCount),
             clog.Err(err))
-        
+
         // 如果重试次数超过限制，发送到死信队列
         if retryCount >= 3 {
             return s.sendToDeadLetterQueue(ctx, msg, err)
         }
-        
+
         // 增加重试次数并重新发送
         return s.retryMessage(ctx, msg, retryCount+1)
     }
-    
+
     logger.Info("支付处理成功", clog.String("payment_id", payment.ID))
     return nil
 }
@@ -744,19 +744,19 @@ func (s *PaymentService) retryMessage(ctx context.Context, msg *mq.Message, retr
         msg.Headers = make(map[string][]byte)
     }
     msg.Headers["Retry-Count"] = []byte(strconv.Itoa(retryCount))
-    
+
     // 延迟重试
     time.AfterFunc(time.Duration(retryCount)*time.Second, func() {
         ack, err := s.producer.SendSync(ctx, msg)
         if err != nil {
             s.logger.Error("重试消息发送失败", clog.Err(err))
         } else {
-            s.logger.Info("重试消息发送成功", 
+            s.logger.Info("重试消息发送成功",
                 clog.String("topic", ack.Topic),
                 clog.Int32("partition", ack.Partition))
         }
     })
-    
+
     return nil
 }
 ```
@@ -770,25 +770,25 @@ func (s *ConsumerManager) Rebalance(ctx context.Context) error {
     if err != nil {
         return fmt.Errorf("获取分区分配失败: %w", err)
     }
-    
+
     // 计算新的分区分配
     newAssignments := s.calculateOptimalAssignments(assignments)
-    
+
     // 应用新的分配
     if err := s.applyAssignments(ctx, newAssignments); err != nil {
         return fmt.Errorf("应用分区分配失败: %w", err)
     }
-    
+
     // 更新消费者组状态
     s.updateConsumerGroupStatus(newAssignments)
-    
+
     return nil
 }
 
 func (s *ConsumerManager) monitorConsumerLag(ctx context.Context) {
     ticker := time.NewTicker(30 * time.Second)
     defer ticker.Stop()
-    
+
     for {
         select {
         case <-ctx.Done():
@@ -806,23 +806,23 @@ func (s *ConsumerManager) checkConsumerLag(ctx context.Context) {
         s.logger.Error("获取消费者组失败", clog.Err(err))
         return
     }
-    
+
     // 检查每个组的消费延迟
     for _, group := range groups {
         lag, err := s.getConsumerLag(ctx, group)
         if err != nil {
-            s.logger.Error("获取消费延迟失败", 
+            s.logger.Error("获取消费延迟失败",
                 clog.String("group", group),
                 clog.Err(err))
             continue
         }
-        
+
         // 如果延迟超过阈值，发出告警
         if lag > s.config.LagThreshold {
-            s.logger.Warn("消费延迟过高", 
+            s.logger.Warn("消费延迟过高",
                 clog.String("group", group),
                 clog.Int64("lag", lag))
-            
+
             // 触发自动扩容
             s.triggerAutoScaling(ctx, group, lag)
         }

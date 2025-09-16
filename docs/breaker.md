@@ -21,7 +21,7 @@ type Provider interface {
     // GetBreaker 获取或创建指定名称的熔断器实例
     // name是被保护资源的唯一标识，如"grpc:user-service"或"http:payment-api"
     GetBreaker(name string) Breaker
-    
+
     // Close 关闭Provider，释放资源
     Close() error
 }
@@ -32,16 +32,16 @@ type Breaker interface {
     // 如果熔断器打开，立即返回ErrBreakerOpen错误
     // 否则执行操作，根据执行结果更新熔断器状态
     Do(ctx context.Context, op func() error) error
-    
+
     // Execute 执行带返回值的受保护操作
     Execute(ctx context.Context, op func() (any, error)) (any, error)
-    
+
     // State 获取当前熔断器状态
     State() State
-    
+
     // Name 获取熔断器名称
     Name() string
-    
+
     // Reset 重置熔断器状态
     Reset() error
 }
@@ -63,13 +63,13 @@ const (
 type Config struct {
     // ServiceName 服务名称，用于日志和监控
     ServiceName string `json:"serviceName"`
-    
+
     // PoliciesPath 熔断策略在配置中心的路径
     PoliciesPath string `json:"policiesPath"`
-    
+
     // DefaultPolicy 默认熔断策略
     DefaultPolicy Policy `json:"defaultPolicy"`
-    
+
     // EnableDynamicConfig 是否启用动态配置
     EnableDynamicConfig bool `json:"enableDynamicConfig"`
 }
@@ -78,19 +78,19 @@ type Config struct {
 type Policy struct {
     // FailureThreshold 触发熔断的连续失败次数
     FailureThreshold int `json:"failureThreshold"`
-    
+
     // SuccessThreshold 半开状态下连续成功次数
     SuccessThreshold int `json:"successThreshold"`
-    
+
     // OpenStateTimeout 熔断器打开状态的持续时间
     OpenStateTimeout time.Duration `json:"openStateTimeout"`
-    
+
     // HalfOpenMaxRequests 半开状态最大请求数
     HalfOpenMaxRequests int `json:"halfOpenMaxRequests"`
-    
+
     // Interval 状态检查间隔
     Interval time.Duration `json:"interval"`
-    
+
     // Timeout 操作超时时间
     Timeout time.Duration `json:"timeout"`
 }
@@ -227,7 +227,7 @@ metrics := map[string]string{
 ```go
 // 设置熔断器事件回调
 breakerInstance.OnStateChange(func(from, to breaker.State) {
-    logger.Info("熔断器状态变更", 
+    logger.Info("熔断器状态变更",
         clog.String("from", from.String()),
         clog.String("to", to.String()))
 })
@@ -244,44 +244,44 @@ import (
     "context"
     "fmt"
     "time"
-    
-    "github.com/gochat-kit/breaker"
-    "github.com/gochat-kit/clog"
-    "github.com/gochat-kit/coord"
+
+    "github.com/infra-kit/breaker"
+    "github.com/infra-kit/clog"
+    "github.com/infra-kit/coord"
 )
 
 func main() {
     ctx := context.Background()
-    
+
     // 初始化依赖组件
     logger := clog.New(ctx, &clog.Config{})
     coordProvider := coord.New(ctx, &coord.Config{})
-    
+
     // 获取默认配置
     config := breaker.GetDefaultConfig("user-service", "production")
     config.PoliciesPath = "/config/prod/user-service/breakers/"
-    
+
     // 创建熔断器Provider
     opts := []breaker.Option{
         breaker.WithLogger(logger),
         breaker.WithCoordProvider(coordProvider),
     }
-    
+
     breakerProvider, err := breaker.New(ctx, config, opts...)
     if err != nil {
         logger.Fatal("创建熔断器失败", clog.Err(err))
     }
     defer breakerProvider.Close()
-    
+
     // 使用熔断器
     serviceBreaker := breakerProvider.GetBreaker("user-service")
-    
+
     // 执行受保护的操作
     err = serviceBreaker.Do(ctx, func() error {
         // 调用下游服务
         return callUserService()
     })
-    
+
     if err != nil {
         if errors.Is(err, breaker.ErrBreakerOpen) {
             logger.Error("服务熔断中")
@@ -305,9 +305,9 @@ package interceptor
 import (
     "context"
     "errors"
-    
-    "github.com/gochat-kit/breaker"
-    "github.com/gochat-kit/clog"
+
+    "github.com/infra-kit/breaker"
+    "github.com/infra-kit/clog"
     "google.golang.org/grpc"
     "google.golang.org/grpc/codes"
     "google.golang.org/grpc/status"
@@ -317,17 +317,17 @@ func BreakerClientInterceptor(provider breaker.Provider) grpc.UnaryClientInterce
     return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
         // 使用方法名作为熔断器名称
         b := provider.GetBreaker(method)
-        
+
         // 执行受保护的gRPC调用
         err := b.Do(ctx, func() error {
             return invoker(ctx, method, req, reply, cc, opts...)
         })
-        
+
         // 转换熔断器错误为gRPC错误
         if errors.Is(err, breaker.ErrBreakerOpen) {
             return status.Error(codes.Unavailable, "service unavailable due to circuit breaker")
         }
-        
+
         return err
     }
 }
@@ -342,9 +342,9 @@ import (
     "context"
     "encoding/json"
     "net/http"
-    
-    "github.com/gochat-kit/breaker"
-    "github.com/gochat-kit/clog"
+
+    "github.com/infra-kit/breaker"
+    "github.com/infra-kit/clog"
 )
 
 type HTTPClient struct {
@@ -362,17 +362,17 @@ func NewHTTPClient(breaker breaker.Breaker) *HTTPClient {
 func (c *HTTPClient) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
     var resp *http.Response
     var err error
-    
+
     // 使用熔断器保护HTTP请求
     err = c.breaker.Do(ctx, func() error {
         resp, err = c.client.Do(req)
         return err
     })
-    
+
     if err != nil {
         return nil, err
     }
-    
+
     return resp, nil
 }
 
@@ -381,13 +381,13 @@ func (c *HTTPClient) GetJSON(ctx context.Context, url string, target interface{}
     if err != nil {
         return err
     }
-    
+
     resp, err := c.Do(ctx, req)
     if err != nil {
         return err
     }
     defer resp.Body.Close()
-    
+
     return json.NewDecoder(resp.Body).Decode(target)
 }
 ```

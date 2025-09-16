@@ -2,7 +2,7 @@
 
 ## 1. 设计理念
 
-`coord` 是 `gochat-kit` 项目的分布式协调核心，基于 `etcd` 构建。它为整个微服务集群提供了一个统一的、可靠的协调层，封装了服务发现、配置中心、分布式锁等复杂性。
+`coord` 是 `infra-kit` 项目的分布式协调核心，基于 `etcd` 构建。它为整个微服务集群提供了一个统一的、可靠的协调层，封装了服务发现、配置中心、分布式锁等复杂性。
 
 ### 核心设计原则
 
@@ -122,12 +122,12 @@ type ConfigCenter interface {
     Set(ctx context.Context, key string, value interface{}) error
     // Delete 删除配置键
     Delete(ctx context.Context, key string) error
-    
+
     // Watch 监听单个配置变更
     Watch(ctx context.Context, key string, value interface{}) (Watcher[any], error)
     // WatchPrefix 监听指定前缀的配置变更
     WatchPrefix(ctx context.Context, prefix string, value interface{}) (Watcher[any], error)
-    
+
     // GetWithVersion 获取配置值和版本号
     GetWithVersion(ctx context.Context, key string, value interface{}) (int64, error)
     // CompareAndSet 原子比较并设置配置值
@@ -201,14 +201,14 @@ type coordProvider struct {
     client    *clientv3.Client
     config    *Config
     logger    clog.Logger
-    
+
     // 服务注册相关
     session   *concurrency.Session
     leases    map[string]*clientv3.LeaseGrantResponse
-    
+
     // 配置缓存
     configCache *sync.Map
-    
+
     // 实例ID分配器
     allocators map[string]*instanceIDAllocator
 }
@@ -222,7 +222,7 @@ func (p *coordProvider) createClient(config *Config) (*clientv3.Client, error) {
         Username:             config.Username,
         Password:             config.Password,
     }
-    
+
     // TLS 配置
     if config.TLS != nil {
         tlsConfig, err := createTLSConfig(config.TLS)
@@ -231,7 +231,7 @@ func (p *coordProvider) createClient(config *Config) (*clientv3.Client, error) {
         }
         clientConfig.TLS = tlsConfig
     }
-    
+
     return clientv3.New(clientConfig)
 }
 ```
@@ -253,15 +253,15 @@ func (c *configCenter) WatchPrefix(ctx context.Context, prefix string, value int
         channel: make(chan ConfigEvent[any], 100),
         done:    make(chan struct{}),
     }
-    
+
     // 启动监听协程
     go watcher.watch(ctx, c.client)
-    
+
     // 注册监听器
     c.watchersMu.Lock()
     c.watchers[prefix] = append(c.watchers[prefix], watcher)
     c.watchersMu.Unlock()
-    
+
     return watcher, nil
 }
 
@@ -274,7 +274,7 @@ type configWatcher struct {
 
 func (w *configWatcher) watch(ctx context.Context, client *clientv3.Client) {
     watchCh := client.Watch(ctx, w.prefix, clientv3.WithPrefix())
-    
+
     for {
         select {
         case <-ctx.Done():
@@ -285,7 +285,7 @@ func (w *configWatcher) watch(ctx context.Context, client *clientv3.Client) {
             if !ok {
                 return
             }
-            
+
             for _, event := range resp.Events {
                 configEvent := w.convertEvent(event)
                 if configEvent != nil {
@@ -308,22 +308,22 @@ type distributedLock struct {
 func (d *distributedLock) Acquire(ctx context.Context, key string, ttl time.Duration) (Lock, error) {
     // 创建会话（如果不存在）
     if d.session == nil {
-        session, err := concurrency.NewSession(d.client, 
+        session, err := concurrency.NewSession(d.client,
             concurrency.WithTTL(int(ttl.Seconds())))
         if err != nil {
             return nil, fmt.Errorf("创建会话失败: %w", err)
         }
         d.session = session
     }
-    
+
     // 创建互斥锁
     mutex := concurrency.NewMutex(d.session, key)
-    
+
     // 尝试获取锁
     if err := mutex.Lock(ctx); err != nil {
         return nil, fmt.Errorf("获取锁失败: %w", err)
     }
-    
+
     return &etcdLock{
         mutex:  mutex,
         key:    key,
@@ -340,23 +340,23 @@ type etcdLock struct {
 func (l *etcdLock) Unlock(ctx context.Context) error {
     // 使用事务确保原子性
     txn := l.client.Txn(ctx)
-    
+
     // 检查锁是否仍然存在
     cmp := clientv3.Compare(clientv3.ModRevision(l.key), ">", 0)
-    
+
     // 删除锁
     del := clientv3.OpDelete(l.key)
-    
+
     // 执行事务
     resp, err := txn.If(cmp).Then(del).Commit()
     if err != nil {
         return fmt.Errorf("释放锁失败: %w", err)
     }
-    
+
     if !resp.Succeeded {
         return fmt.Errorf("锁不存在或已被其他客户端持有")
     }
-    
+
     return nil
 }
 ```
@@ -376,7 +376,7 @@ type instanceIDAllocator struct {
 func (a *instanceIDAllocator) AcquireID(ctx context.Context) (AllocatedID, error) {
     a.mu.Lock()
     defer a.mu.Unlock()
-    
+
     // 创建会话（如果不存在）
     if a.session == nil {
         session, err := concurrency.NewSession(a.client)
@@ -385,7 +385,7 @@ func (a *instanceIDAllocator) AcquireID(ctx context.Context) (AllocatedID, error
         }
         a.session = session
     }
-    
+
     // 尝试分配ID
     for i := 0; i < a.maxID; i++ {
         if !a.allocated[i] {
@@ -395,7 +395,7 @@ func (a *instanceIDAllocator) AcquireID(ctx context.Context) (AllocatedID, error
             if err != nil {
                 continue
             }
-            
+
             // 尝试创建临时节点
             _, err = a.client.Put(ctx, key, "", clientv3.WithLease(resp.ID))
             if err == nil {
@@ -410,7 +410,7 @@ func (a *instanceIDAllocator) AcquireID(ctx context.Context) (AllocatedID, error
             }
         }
     }
-    
+
     return nil, fmt.Errorf("无可用的实例ID")
 }
 
@@ -428,12 +428,12 @@ func (a *allocatedID) Close(ctx context.Context) error {
     if err != nil {
         return fmt.Errorf("释放租约失败: %w", err)
     }
-    
+
     // 从分配器中移除
     a.alloc.mu.Lock()
     a.alloc.allocated[a.id] = false
     a.alloc.mu.Unlock()
-    
+
     return nil
 }
 ```
@@ -445,11 +445,11 @@ func (a *allocatedID) Close(ctx context.Context) error {
 ```go
 func main() {
     ctx := context.Background()
-    
+
     // 1. 初始化协调组件
     config := coord.GetDefaultConfig("production")
     config.Endpoints = []string{"etcd1:2379", "etcd2:2379", "etcd3:2379"}
-    
+
     coordProvider, err := coord.New(ctx, config,
         coord.WithLogger(clog.Namespace("coord")),
     )
@@ -474,23 +474,23 @@ func (s *UserService) Start(ctx context.Context) error {
             "region":  "cn-north-1",
         },
     }
-    
+
     err := s.coord.Registry().Register(ctx, serviceInfo, 30*time.Second)
     if err != nil {
         return fmt.Errorf("服务注册失败: %w", err)
     }
-    
+
     // 启动服务
     go s.startServer()
-    
+
     // 监听服务变更
     events, err := s.coord.Registry().Watch(ctx, "payment-service")
     if err != nil {
         return fmt.Errorf("监听服务变更失败: %w", err)
     }
-    
+
     go s.handleServiceEvents(events)
-    
+
     return nil
 }
 
@@ -500,7 +500,7 @@ func (s *PaymentService) CallUserService(ctx context.Context, userID string) (*U
     if err != nil {
         return nil, fmt.Errorf("获取用户服务连接失败: %w", err)
     }
-    
+
     client := pb.NewUserServiceClient(conn)
     return client.GetUser(ctx, &pb.GetUserRequest{UserId: userID})
 }
@@ -517,7 +517,7 @@ func (s *ConfigService) WatchRateLimitRules(ctx context.Context) {
         return
     }
     defer watcher.Close()
-    
+
     for event := range watcher.Chan() {
         switch event.Type {
         case coord.PUT:
@@ -532,21 +532,21 @@ func (s *ConfigService) WatchRateLimitRules(ctx context.Context) {
 
 func (s *ConfigService) UpdateFeatureFlag(ctx context.Context, flagName string, enabled bool) error {
     key := fmt.Sprintf("/features/%s", flagName)
-    
+
     // 获取当前版本
     current := &FeatureFlag{}
     version, err := s.coord.Config().GetWithVersion(ctx, key, current)
     if err != nil && !errors.Is(err, coord.ErrNotFound) {
         return fmt.Errorf("获取当前配置失败: %w", err)
     }
-    
+
     // 更新配置
     newFlag := &FeatureFlag{
         Name:     flagName,
         Enabled:  enabled,
         UpdateAt: time.Now(),
     }
-    
+
     return s.coord.Config().CompareAndSet(ctx, key, newFlag, version)
 }
 ```
@@ -561,14 +561,14 @@ func (s *OrderService) ProcessOrder(ctx context.Context, orderID string) error {
         return fmt.Errorf("获取订单处理锁失败: %w", err)
     }
     defer lock.Unlock(ctx)
-    
+
     // 检查锁是否仍然有效
     if ttl, err := lock.TTL(ctx); err != nil {
         return fmt.Errorf("检查锁TTL失败: %w", err)
     } else if ttl <= 0 {
         return fmt.Errorf("锁已过期")
     }
-    
+
     // 处理订单逻辑
     return s.processOrderLogic(ctx, orderID)
 }
@@ -583,20 +583,20 @@ func (s *UserService) StartWorker(ctx context.Context) error {
     if err != nil {
         return fmt.Errorf("获取实例ID分配器失败: %w", err)
     }
-    
+
     // 分配实例ID
     instanceID, err := allocator.AcquireID(ctx)
     if err != nil {
         return fmt.Errorf("分配实例ID失败: %w", err)
     }
     defer instanceID.Close(ctx)
-    
+
     s.instanceID = instanceID.ID()
     s.logger.Info("工作实例启动", clog.Int("instance_id", s.instanceID))
-    
+
     // 启动工作协程
     go s.startWorkerLoop(ctx)
-    
+
     return nil
 }
 ```
@@ -609,7 +609,7 @@ func (s *UserService) StartWorker(ctx context.Context) error {
 func (c *configCenter) startConfigSync(ctx context.Context) {
     ticker := time.NewTicker(c.provider.config.SyncInterval)
     defer ticker.Stop()
-    
+
     for {
         select {
         case <-ctx.Done():
@@ -627,7 +627,7 @@ func (c *configCenter) syncConfigs(ctx context.Context) {
         c.provider.logger.Error("同步配置失败", clog.Err(err))
         return
     }
-    
+
     // 同步每个配置
     for _, key := range keys {
         var value interface{}
@@ -646,14 +646,14 @@ func (p *coordProvider) HealthCheck(ctx context.Context) error {
     if err := p.client.Sync(ctx); err != nil {
         return fmt.Errorf("etcd 连接失败: %w", err)
     }
-    
+
     // 检查会话状态
     if p.session != nil {
         if err := p.session.Orphan(); err != nil {
             return fmt.Errorf("会话异常: %w", err)
         }
     }
-    
+
     // 检查租约状态
     for leaseID := range p.leases {
         ttl, err := p.client.TimeToLive(ctx, leaseID)
@@ -661,7 +661,7 @@ func (p *coordProvider) HealthCheck(ctx context.Context) error {
             return fmt.Errorf("租约 %d 已失效", leaseID)
         }
     }
-    
+
     return nil
 }
 ```

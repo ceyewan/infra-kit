@@ -20,15 +20,15 @@ type Provider interface {
     // 如果key对应的操作已经成功执行过，则直接返回nil
     // 否则，执行函数f。如果f返回错误，幂等标记不会被持久化，允许重试
     Do(ctx context.Context, key string, ttl time.Duration, f func() error) error
-    
+
     // Execute 执行一个带返回值的幂等操作
     // 如果操作已执行过，它会直接返回缓存的结果
     // 否则，执行callback，缓存其结果，并返回
     Execute(ctx context.Context, key string, ttl time.Duration, callback func() (any, error)) (any, error)
-    
+
     // Clear 主动清除指定key的幂等标记和缓存结果
     Clear(ctx context.Context, key string) error
-    
+
     // Close 关闭Provider并释放相关资源
     Close() error
 }
@@ -41,19 +41,19 @@ type Provider interface {
 type Config struct {
     // Mode 幂等模式：local 或 distributed
     Mode string `json:"mode"`
-    
+
     // ServiceName 服务名称，用于日志和监控
     ServiceName string `json:"serviceName"`
-    
+
     // KeyPrefix 为所有幂等key添加前缀，用于命名空间隔离
     KeyPrefix string `json:"keyPrefix"`
-    
+
     // DefaultTTL 默认过期时间
     DefaultTTL time.Duration `json:"defaultTTL"`
-    
+
     // LocalConfig 单机幂等配置
     LocalConfig LocalConfig `json:"localConfig"`
-    
+
     // DistributedConfig 分布式幂等配置
     DistributedConfig DistributedConfig `json:"distributedConfig"`
 }
@@ -62,7 +62,7 @@ type Config struct {
 type LocalConfig struct {
     // CleanupInterval 清理间隔
     CleanupInterval time.Duration `json:"cleanupInterval"`
-    
+
     // MaxEntries 最大缓存条目数
     MaxEntries int `json:"maxEntries"`
 }
@@ -71,13 +71,13 @@ type LocalConfig struct {
 type DistributedConfig struct {
     // RedisKeyPrefix Redis键前缀
     RedisKeyPrefix string `json:"redisKeyPrefix"`
-    
+
     // ResultKeyPrefix 结果缓存键前缀
     ResultKeyPrefix string `json:"resultKeyPrefix"`
-    
+
     // LockTimeout 锁超时时间
     LockTimeout time.Duration `json:"lockTimeout"`
-    
+
     // ScriptLua Lua脚本内容
     ScriptLua string `json:"scriptLua"`
 }
@@ -223,43 +223,43 @@ import (
     "context"
     "fmt"
     "time"
-    
-    "github.com/gochat-kit/once"
-    "github.com/gochat-kit/clog"
-    "github.com/gochat-kit/cache"
+
+    "github.com/infra-kit/once"
+    "github.com/infra-kit/clog"
+    "github.com/infra-kit/cache"
 )
 
 func main() {
     ctx := context.Background()
-    
+
     // 初始化依赖组件
     logger := clog.New(ctx, &clog.Config{})
     cacheProvider := cache.New(ctx, &cache.Config{})
-    
+
     // 获取默认配置
     config := once.GetDefaultConfig("production")
     config.ServiceName = "payment-service"
     config.KeyPrefix = "idempotent:"
-    
+
     // 创建幂等Provider
     opts := []once.Option{
         once.WithLogger(logger),
         once.WithCacheProvider(cacheProvider),
     }
-    
+
     onceProvider, err := once.New(ctx, config, opts...)
     if err != nil {
         logger.Fatal("创建幂等器失败", clog.Err(err))
     }
     defer onceProvider.Close()
-    
+
     // 使用幂等器
     orderID := "order123"
     err = onceProvider.Do(ctx, fmt.Sprintf("payment:process:%s", orderID), 24*time.Hour, func() error {
         // 执行支付处理逻辑
         return processPayment(ctx, orderID)
     })
-    
+
     if err != nil {
         logger.Error("支付处理失败", clog.Err(err))
     } else {
@@ -283,10 +283,10 @@ import (
     "encoding/json"
     "fmt"
     "time"
-    
-    "github.com/gochat-kit/once"
-    "github.com/gochat-kit/clog"
-    "github.com/gochat-kit/mq"
+
+    "github.com/infra-kit/once"
+    "github.com/infra-kit/clog"
+    "github.com/infra-kit/mq"
 )
 
 type PaymentConsumer struct {
@@ -307,27 +307,27 @@ func (c *PaymentConsumer) Start(ctx context.Context) error {
 
 func (c *PaymentConsumer) handlePaymentMessage(ctx context.Context, msg *mq.Message) error {
     logger := clog.WithContext(ctx)
-    
+
     // 解析消息
     var paymentMessage PaymentMessage
     if err := json.Unmarshal(msg.Value, &paymentMessage); err != nil {
         logger.Error("解析支付消息失败", clog.Err(err))
         return err
     }
-    
+
     // 构建幂等键
     idempotencyKey := fmt.Sprintf("payment:process:%s", paymentMessage.OrderID)
-    
+
     // 使用Execute保证幂等性和结果缓存
     result, err := c.onceProvider.Execute(ctx, idempotencyKey, 24*time.Hour, func() (any, error) {
         logger.Info("开始处理支付", clog.String("order_id", paymentMessage.OrderID))
-        
+
         // 执行支付逻辑
         err := c.processPayment(ctx, &paymentMessage)
         if err != nil {
             return nil, err
         }
-        
+
         // 返回处理结果
         return &PaymentResult{
             OrderID:    paymentMessage.OrderID,
@@ -335,20 +335,20 @@ func (c *PaymentConsumer) handlePaymentMessage(ctx context.Context, msg *mq.Mess
             ProcessedAt: time.Now(),
         }, nil
     })
-    
+
     if err != nil {
-        logger.Error("支付处理失败", 
-            clog.Err(err), 
+        logger.Error("支付处理失败",
+            clog.Err(err),
             clog.String("order_id", paymentMessage.OrderID))
         return err
     }
-    
+
     // 处理结果
     paymentResult := result.(*PaymentResult)
-    logger.Info("支付处理完成", 
+    logger.Info("支付处理完成",
         clog.String("order_id", paymentResult.OrderID),
         clog.String("status", paymentResult.Status))
-    
+
     return nil
 }
 
@@ -367,10 +367,10 @@ import (
     "context"
     "net/http"
     "time"
-    
+
     "github.com/gin-gonic/gin"
-    "github.com/gochat-kit/once"
-    "github.com/gochat-kit/clog"
+    "github.com/infra-kit/once"
+    "github.com/infra-kit/clog"
 )
 
 type OrderHandler struct {
@@ -386,48 +386,48 @@ func NewOrderHandler(onceProvider once.Provider) *OrderHandler {
 func (h *OrderHandler) CreateOrder(c *gin.Context) {
     ctx := c.Request.Context()
     logger := clog.WithContext(ctx)
-    
+
     // 获取幂等键
     idempotencyKey := c.GetHeader("X-Idempotency-Key")
     if idempotencyKey == "" {
         c.JSON(http.StatusBadRequest, gin.H{"error": "缺少幂等键"})
         return
     }
-    
+
     // 构建幂等键
     key := "order:create:" + idempotencyKey
-    
+
     // 使用Execute保证创建操作的幂等性
     result, err := h.onceProvider.Execute(ctx, key, 24*time.Hour, func() (any, error) {
         logger.Info("开始创建订单", clog.String("idempotency_key", idempotencyKey))
-        
+
         // 解析请求参数
         var req CreateOrderRequest
         if err := c.ShouldBindJSON(&req); err != nil {
             return nil, err
         }
-        
+
         // 创建订单
         order, err := h.createOrder(ctx, req)
         if err != nil {
             return nil, err
         }
-        
-        logger.Info("订单创建成功", 
+
+        logger.Info("订单创建成功",
             clog.String("order_id", order.ID),
             clog.String("idempotency_key", idempotencyKey))
-        
+
         return order, nil
     })
-    
+
     if err != nil {
-        logger.Error("创建订单失败", 
-            clog.Err(err), 
+        logger.Error("创建订单失败",
+            clog.Err(err),
             clog.String("idempotency_key", idempotencyKey))
         c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
         return
     }
-    
+
     // 返回结果
     order := result.(*Order)
     c.JSON(http.StatusOK, gin.H{"order": order})
