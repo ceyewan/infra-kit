@@ -9,8 +9,9 @@
 1. **多算法支持**: 同时支持 Snowflake 和 UUID v7 两种生成算法
 2. **场景适配**: 为不同的使用场景提供最合适的 ID 类型
 3. **高性能**: Snowflake ID 生成速度极快，适合高并发场景
-4. **分布式安全**: 通过协调服务保证实例 ID 的唯一性
+4. **实例安全**: 通过实例 ID 管理保证多实例环境下的唯一性
 5. **易于使用**: 统一的 API 接口，简化使用复杂度
+6. **无外部依赖**: 当前实现无需协调服务，降低部署复杂度
 
 ### 应用场景
 
@@ -23,7 +24,7 @@
 
 ```
 公共 API 层
-├── New/Init (Provider 模式)
+├── New (Provider 模式)
 ├── GetUUIDV7() (UUID v7 生成)
 ├── GenerateSnowflake() (Snowflake 生成)
 ├── IsValidUUID() (UUID 验证)
@@ -31,19 +32,18 @@
 └── Close() (资源释放)
 
 配置层
-├── Config 结构 (ServiceName, MaxInstanceID)
+├── Config 结构 (ServiceName, MaxInstanceID, InstanceID)
 ├── GetDefaultConfig() (环境相关默认值)
 └── Validate() (配置验证)
 
 核心算法层
 ├── Snowflake 算法 (时间戳 + 实例 ID + 序列号)
-├── UUID v7 算法 (时间戳 + 随机数)
-└── 实例 ID 管理 (协调服务集成)
+├── UUID v7 算法 (基于 Google UUID 库)
+└── 实例 ID 管理 (配置/环境变量/随机分配)
 
 内部实现层
 ├── snowflakeGenerator (Snowflake 生成器)
-├── uuidGenerator (UUID 生成器)
-└── 协议适配层 (coord.Provider 接口)
+└── uuidGenerator (UUID 生成器)
 ```
 
 ### 核心组件
@@ -63,29 +63,28 @@ type Provider interface {
 #### 2. Snowflake 算法实现
 
 **位分配**:
-- 时间戳: 42 位 (69 年可用)
+- 时间戳: 42 位 (69 年可用，从 2021-01-01 开始)
 - 实例 ID: 10 位 (最多 1024 个实例)
 - 序列号: 12 位 (每毫秒 4096 个 ID)
 
 **特性**:
-- 时钟回拨检测
+- 时钟回拨检测和错误处理
 - 序列号溢出保护
-- 高并发安全
-- 批量生成支持
+- 高并发安全 (互斥锁保护)
+- 线程安全的 ID 生成
 
 #### 3. UUID v7 算法实现
 
-**格式**:
-- 前 6 字节: 时间戳 (48 位)
-- 第 7 字节: 版本号 (0111)
-- 第 8 字节: 变体 (10xx)
-- 后 10 字节: 随机数
+**实现**:
+- 基于 Google UUID 库，确保标准兼容性
+- RFC 4122 规范的 UUID v7 格式
+- 时间有序的全局唯一标识符
 
 **特性**:
-- 时间有序
-- 全局唯一
-- 高性能生成
-- 标准格式
+- 时间有序，便于索引和排序
+- 全局唯一性保证
+- 高性能生成 (无状态设计)
+- 标准格式验证
 
 ## 🔧 核心实现
 
@@ -101,11 +100,11 @@ type snowflakeGenerator struct {
 }
 
 const (
-    snowflakeEpoch = 1609459200000 // 2021-01-01 00:00:00 UTC
-    instanceIDBits = 10
-    sequenceBits  = 12
-    maxInstanceID = (1 << instanceIDBits) - 1 // 1023
-    maxSequence   = (1 << sequenceBits) - 1  // 4095
+    SnowflakeEpoch = 1609459200000 // 2021-01-01 00:00:00 UTC
+    InstanceIDBits = 10
+    SequenceBits   = 12
+    MaxInstanceID = (1 << InstanceIDBits) - 1 // 1023
+    MaxSequence   = (1 << SequenceBits) - 1   // 4095
 )
 ```
 
@@ -113,75 +112,65 @@ const (
 - **线程安全**: 使用互斥锁保护共享状态
 - **时钟回拨检测**: 防止时间回溯导致 ID 重复
 - **序列号管理**: 同一毫秒内递增序列号，溢出时等待下一毫秒
-- **批量生成**: 支持一次性生成多个 ID，提高性能
+- **错误处理**: 明确的错误类型和错误信息
 
 ### 2. UUID v7 生成器
 
 ```go
-func generateUUIDV7() string {
-    // 获取当前时间戳（毫秒级）
-    timestamp := time.Now().UnixMilli()
-    
-    // 创建 16 字节的 UUID
-    uuid := make([]byte, 16)
-    
-    // 前 6 字节为时间戳
-    binary.BigEndian.PutUint64(uuid[0:6], timestamp)
-    
-    // 设置版本号和变体
-    uuid[6] = (uuid[6] & 0x0F) | 0x70  // 版本 7
-    uuid[8] = (uuid[8] & 0x3F) | 0x80  // 变体 10
-    
-    // 剩余字节为随机数
-    rand.Read(uuid[6:16])
-    
-    // 格式化为标准 UUID 字符串
-    return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", ...)
+// 使用 Google UUID 库生成 UUID v7
+func GenerateUUIDV7() string {
+    u, err := uuid.NewV7()
+    if err != nil {
+        // 备选方案
+        return uuid.New().String()
+    }
+    return u.String()
 }
 ```
 
 **关键特性**:
-- **时间有序**: 基于时间戳，保证大致按时间排序
-- **随机性**: 后 10 字节随机数，保证唯一性
-- **性能优化**: 使用对象池减少内存分配
-- **标准格式**: 符合 RFC 4122 规范
+- **标准兼容**: 严格遵循 RFC 4122 规范
+- **版本验证**: 验证 UUID 版本号为 7
+- **变体验证**: 验证变体为 RFC 4122
+- **错误处理**: 生成失败时的备选方案
 
 ### 3. 实例 ID 管理
 
 ```go
 type uidProvider struct {
-    config       *Config
-    logger       clog.Logger
-    coord        coord.Provider
-    snowflake    *snowflakeGenerator
-    instanceID   int64
-    leaseID      string
-    closeChan    chan struct{}
+    config     *Config
+    logger     clog.Logger
+    snowflake  *internal.SnowflakeGenerator
+    instanceID int64
+    closeOnce  sync.Once
 }
 ```
 
-**分布式模式**:
-- 通过 `coord.Provider` 分配全局唯一的实例 ID
-- 定期续期租约，确保实例 ID 的有效性
-- 优雅释放资源，避免实例 ID 泄漏
+**实例 ID 分配策略**:
+- **配置指定**: 通过 Config.InstanceID 直接指定
+- **环境变量**: 通过 INSTANCE_ID 环境变量设置
+- **随机分配**: 当 InstanceID=0 时随机分配 (0-MaxInstanceID)
 
-**单机模式**:
-- 使用随机实例 ID，适用于单机部署
-- 无需协调服务，降低系统复杂度
+**TODO: 未来扩展**:
+- 添加 coord.Provider 集成支持分布式实例 ID 管理
+- 实现实例 ID 租约机制
+- 添加实例 ID 动态分配和释放
 
 ### 4. 配置系统
 
 ```go
 type Config struct {
     ServiceName   string `json:"serviceName"`   // 服务名称
-    MaxInstanceID int    `json:"maxInstanceID"` // 最大实例 ID
+    MaxInstanceID int    `json:"maxInstanceID"` // 最大实例 ID (1-1023)
+    InstanceID    int    `json:"instanceId"`    // 实例 ID (0=自动分配)
 }
 ```
 
 **配置验证**:
 - 服务名称不能为空
-- 实例 ID 范围在 1-1023 之间
-- 环境相关默认值
+- 实例 ID 范围验证 (0-MaxInstanceID)
+- 最大实例 ID 范围验证 (1-1023)
+- 环境变量支持
 
 ## 🔄 错误处理策略
 
@@ -201,33 +190,31 @@ func (g *snowflakeGenerator) Generate() (int64, error) {
 **处理策略**:
 - 检测到时钟回拨时立即返回错误
 - 避免生成重复的 ID
-- 记录错误日志，便于排查问题
+- 提供明确的错误信息便于排查
 
-### 2. 实例 ID 分配失败
+### 2. 配置错误处理
 
 ```go
-func (p *uidProvider) acquireInstanceID(ctx context.Context) error {
-    instanceID, leaseID, err := p.coord.Instance().Allocate(ctx, p.config.ServiceName, p.config.MaxInstanceID)
-    if err != nil {
-        return fmt.Errorf("分配实例 ID 失败: %w", err)
+func (c *Config) Validate() error {
+    if c.ServiceName == "" {
+        return fmt.Errorf("服务名称不能为空")
     }
-    // ...
+    // ... 其他验证
 }
 ```
 
 **处理策略**:
-- 重试机制（最多 3 次）
-- 错误日志记录
-- 优雅降级（单机模式）
+- 启动时快速失败
+- 提供清晰的错误信息
+- 支持环境变量配置
 
 ### 3. 资源清理
 
 ```go
 func (p *uidProvider) Close() error {
     p.closeOnce.Do(func() {
-        close(p.closeChan)
-        if p.leaseID != "" && p.coord != nil {
-            p.coord.Instance().Release(ctx, p.leaseID)
+        if p.logger != nil {
+            p.logger.Info("uid 组件已关闭")
         }
     })
     return nil
@@ -236,45 +223,40 @@ func (p *uidProvider) Close() error {
 
 **处理策略**:
 - 使用 `sync.Once` 确保只执行一次
-- 释放实例 ID 租约
-- 关闭后台协程
+- 记录关闭日志
+- 支持优雅关闭
 
 ## 🎨 性能优化
 
-### 1. Snowflake 性能优化
+### 1. Snowflake 性能特性
 
-**批量生成**:
-```go
-func (g *snowflakeGenerator) GenerateBatch(count int) ([]int64, error) {
-    // 减少锁竞争，一次性生成多个 ID
-    // 适用于需要大量 ID 的场景
-}
-```
+**生成性能**:
+- 单次生成: 微秒级响应
+- 支持高并发: 互斥锁保护
+- 内存效率: 使用 int64 类型，避免内存分配
 
-**内存对齐**:
-- 使用 int64 类型确保原子操作
-- 避免伪共享，提高缓存命中率
+**优化策略**:
+- 减少锁持有时间
+- 使用高效的位运算
+- 避免不必要的内存分配
 
-### 2. UUID v7 性能优化
+### 2. UUID v7 性能特性
 
-**对象池**:
-```go
-var uuidPool = sync.Pool{
-    New: func() interface{} {
-        return make([]byte, 16)
-    },
-}
-```
+**生成性能**:
+- 无状态设计，天然支持高并发
+- 基于 Google UUID 库优化
+- 无锁并发，支持极高吞吐量
 
-**预分配缓冲区**:
-- 减少内存分配开销
-- 提高并发性能
+**优化策略**:
+- 使用成熟的第三方库
+- 避免重复实现
+- 保证标准兼容性
 
 ## 📊 并发安全性
 
 ### 1. Snowflake 生成器
 
-**互斥锁保护**:
+**并发控制**:
 ```go
 func (g *snowflakeGenerator) Generate() (int64, error) {
     g.mu.Lock()
@@ -283,14 +265,15 @@ func (g *snowflakeGenerator) Generate() (int64, error) {
 }
 ```
 
-**原子操作**:
-- 时间戳和序列号的更新是原子的
+**安全保证**:
+- 互斥锁保护所有共享状态
+- 原子操作更新时间戳和序列号
 - 避免竞态条件
 
 ### 2. UUID v7 生成器
 
-**无状态设计**:
-- 每次生成都是独立的
+**并发安全**:
+- 每次生成都是独立的操作
 - 不需要锁保护
 - 天然支持高并发
 
@@ -299,21 +282,19 @@ func (g *snowflakeGenerator) Generate() (int64, error) {
 ### 1. 初始化流程
 
 ```
-配置验证 → 选项解析 → 实例 ID 分配 → 生成器初始化 → 后台协程启动
+配置验证 → 选项解析 → 实例 ID 分配 → 生成器初始化
 ```
 
 ### 2. 运行时管理
 
 ```
 ID 生成请求 → 算法处理 → 结果返回
-                  ↓
-            租约续期协程
 ```
 
 ### 3. 关闭流程
 
 ```
-关闭信号 → 停止后台协程 → 释放实例 ID → 资源清理
+Close() 调用 → 资源清理 → 日志记录
 ```
 
 ## 🔧 配置最佳实践
@@ -324,6 +305,7 @@ ID 生成请求 → 算法处理 → 结果返回
 config := &uid.Config{
     ServiceName:   "order-service",      // 清晰的服务标识
     MaxInstanceID: 100,                  // 根据集群规模设置
+    InstanceID:    5,                    // 指定实例 ID
 }
 ```
 
@@ -342,14 +324,33 @@ prodConfig.ServiceName = "prod-order-service"
 ### 3. 实例 ID 规划
 
 ```go
-// 小型集群（< 100 实例）
-config.MaxInstanceID = 100
+// 单实例部署
+config := &uid.Config{
+    ServiceName:   "single-service",
+    MaxInstanceID: 1,
+    InstanceID:    1,
+}
 
-// 中型集群（< 500 实例）
-config.MaxInstanceID = 500
+// 小型集群 (3-5 实例)
+config := &uid.Config{
+    ServiceName:   "small-cluster-service",
+    MaxInstanceID: 10,
+    InstanceID:    getInstanceID(), // 1-10
+}
 
-// 大型集群（< 1024 实例）
-config.MaxInstanceID = 1023
+// 中型集群 (10-100 实例)
+config := &uid.Config{
+    ServiceName:   "medium-cluster-service",
+    MaxInstanceID: 100,
+    InstanceID:    getInstanceID(), // 1-100
+}
+
+// 大型集群 (100-1024 实例)
+config := &uid.Config{
+    ServiceName:   "large-cluster-service",
+    MaxInstanceID: 1023,
+    InstanceID:    getInstanceID(), // 1-1023
+}
 ```
 
 ## 📈 监控和可观测性
@@ -364,48 +365,75 @@ config.MaxInstanceID = 1023
 ### 2. 日志记录
 
 ```go
-clog.Info("ID 生成统计",
-    clog.String("service", config.ServiceName),
-    clog.Int64("generated_count", totalCount),
-    clog.Float64("error_rate", errorRate),
+clog.Info("uid 组件初始化成功",
+    clog.String("service_name", config.ServiceName),
     clog.Int64("instance_id", instanceID),
+    clog.Int("max_instance_id", config.MaxInstanceID),
 )
 ```
 
 ### 3. 健康检查
 
-- 实例 ID 租约状态
-- 协调服务连接状态
-- 时钟同步状态
+- 实例 ID 配置状态
+- 组件初始化状态
+- 配置验证状态
 
 ## 🔮 未来扩展
 
-### 1. 算法扩展
+### 1. 分布式支持
+
+**TODO: coord 组件集成**
+- 添加 `WithCoordProvider()` 选项
+- 实现分布式实例 ID 分配
+- 支持实例 ID 租约管理
+- 添加优雅的资源释放机制
+
+```go
+// 未来扩展设计
+type uidProvider struct {
+    config     *Config
+    logger     clog.Logger
+    coord      coord.Provider  // 协调服务依赖
+    snowflake  *internal.SnowflakeGenerator
+    instanceID int64
+    leaseID    string          // 租约 ID
+    closeChan  chan struct{}   // 关闭信号
+    closeOnce  sync.Once
+}
+```
+
+### 2. 算法扩展
 
 - **UUID v8**: 支持自定义哈希算法
 - **雪花 ID 变体**: 支持不同的位分配方案
 - **分段 ID**: 支持业务相关的分段生成
 
-### 2. 功能扩展
+### 3. 功能扩展
 
 - **ID 模板**: 支持业务定制的 ID 格式
 - **批量导入**: 支持外部 ID 批量导入
 - **ID 查询**: 支持基于时间戳的 ID 查询
 
-### 3. 性能优化
+### 4. 性能优化
 
-- **异步生成**: 支持异步 ID 生成队列
+- **批量生成**: 解决并发安全问题，支持批量 ID 生成
 - **本地缓存**: 缓存生成的 ID 提高性能
-- **分布式缓存**: 支持跨实例的 ID 缓存
+- **异步生成**: 支持异步 ID 生成队列
 
 ## 🎯 设计总结
 
-`uid` 组件通过提供 Snowflake 和 UUID v7 两种生成算法，满足了不同业务场景的需求。其设计具有以下特点：
+`uid` 组件通过提供 Snowflake 和 UUID v7 两种生成算法，满足了不同业务场景的需求。当前实现具有以下特点：
 
-1. **高可用性**: 支持单机和分布式两种部署模式
-2. **高性能**: Snowflake 算法支持每秒数十万 ID 生成
-3. **易使用**: 统一的 API 接口，简化使用复杂度
-4. **可扩展**: 支持未来算法和功能的扩展
-5. **可观测**: 完整的监控和日志支持
+1. **简洁高效**: 无需外部依赖，部署简单
+2. **高性能**: 支持高并发 ID 生成
+3. **灵活配置**: 支持多种实例 ID 分配策略
+4. **易于使用**: 统一的 API 接口，简化使用复杂度
+5. **可扩展**: 为未来的分布式支持预留了扩展点
+6. **生产就绪**: 包含完整的错误处理和资源管理
 
-这个设计使 `uid` 成为 infra-kit 项目中不可或缺的基础设施组件。
+**当前限制**:
+- 不支持分布式实例 ID 管理 (待 coord 组件实现)
+- 批量生成功能存在并发安全问题，暂时不提供
+- 缺少动态配置更新支持
+
+这个设计使 `uid` 成为 infra-kit 项目中重要的基础设施组件，能够满足大多数场景的唯一 ID 生成需求。
