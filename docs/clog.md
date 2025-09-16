@@ -2,202 +2,286 @@
 
 ## 1. 设计理念
 
-`clog` 是 `gochat` 项目的官方结构化日志库，基于 `uber-go/zap` 构建。它旨在提供一个**简洁、高性能、上下文感知**的日志解决#### 设计注记：为何提供 `WithTraceID`?
+`clog` 是 `gochat-kit` 项目的结构化日志组件，基于 `uber-go/zap` 构建。它为微服务架构提供了统一、高性能、上下文感知的日志解决方案。
 
-一个合理的设计问题是：为何 `clog` 要提供 `WithTraceID` 来"写"上下文，而不是让调用者自己管理？
+### 核心设计原则
 
-答案是：**为了实现完美的封装和提供类型安全的、统一的 API**。
+- **统一接口**: 通过 Provider 模式提供一致的日志体验，支持全局和实例化两种使用方式
+- **层次化命名空间**: 支持链式调用构建清晰的日志标识体系，便于服务、模块、组件的分层管理
+- **上下文感知**: 自动从 `context.Context` 中提取 `trace_id`，实现完整的请求链路追踪
+- **高性能**: 基于 `zap` 的零内存分配日志记录引擎，对业务性能影响降至最低
+- **组件自治**: 支持动态配置，内部监听配置变更并自动更新日志行为
 
-- **封装**: `WithTraceID` 将用于存储 `trace_id` 的 `context.key` 作为包内私有变量，避免了将这个实现细节泄露给外部。这是 Go 社区处理上下文传递的**最佳实践**。
-- **API 完整性**: 提供 `WithTraceID` 和 `WithContext` 形成了一套完整、对称的 API，所有与日志上下文相关的操作都内聚在 `clog` 包内，职责清晰。
+### 组件价值
 
-#### 关键疑问解答：WithTraceID 和 WithContext 的关系
-
-很多开发者会困惑：**为什么需要两个看起来无关的方法？**
-
-**流程解释**：
-1. `WithTraceID(ctx, traceID)` → **注入阶段**：在中间件/拦截器中将 traceID 存储到 context
-2. `WithContext(ctx)` → **提取阶段**：在业务代码中从 context 提取 traceID 并创建带追踪的 logger
-
-```go
-// 中间件：注入 traceID 到 context
-ctx := clog.WithTraceID(originalCtx, "abc123")
-
-// 业务代码：从 context 提取 traceID 创建 logger  
-logger := clog.WithContext(ctx)  // 内部会自动提取 "abc123" 并添加到日志字段
-```
-
-**并发安全性保证**：
-- 每个 HTTP 请求都有**独立的 context.Context**
-- `WithTraceID` 创建**新的 context**，不修改原有的
-- 不同请求的 context 互相**完全隔离**
-
-**方法命名的设计意图**：
-- `WithTraceID`: 明确表示"创建包含追踪ID的上下文"
-- `WithContext`: 明确表示"根据上下文创建日志器"
-- 统一的 `With` 前缀，保持 API 风格一致性
-
-这种设计使得 traceID 的管理**完全透明化**：业务代码只需要传递 context，无需关心 traceID 的具体实现。结构化日志记录的最佳实践。
-
-- **简洁易用**: API 设计简单直观，提供了方便的全局方法，极大降低了使用门槛。
-- **高性能**: 基于 `zap` 的零内存分配日志记录引擎，对业务性能影响降至最低。
-- **上下文感知**: 能够自动从 `context.Context` 中提取 `trace_id`，将分散的日志条目串联成完整的请求链路，是实现微服务可观测性的关键。
-- **模块化**: 支持为不同的服务或业务模块创建专用的、带 `module` 字段的日志器，便于日志的分类和筛选。
+- **可观测性**: 通过结构化日志和链路追踪，提供系统行为的完整可见性
+- **调试效率**: 层次化命名空间和上下文信息，快速定位问题根源
+- **运维友好**: JSON 格式输出，便于日志收集、分析和监控
+- **开发体验**: 简洁的 API 设计，降低使用门槛
 
 ## 2. 核心 API 契约
 
-`clog` 的 API 设计兼顾了易用性（全局方法）和灵活性（可实例化的 Logger）。
-
-### 2.1 构造函数与初始化
-
-`clog` 支持两种初始化方式：全局初始化和独立实例创建。
+### 2.1 构造函数与配置
 
 ```go
-// Config 是 clog 组件的配置结构体。
+// Config 是 clog 组件的配置结构体
 type Config struct {
-	// Level 日志级别: "debug", "info", "warn", "error", "fatal"
-	Level string `json:"level"`
-	// Format 输出格式: "json" (生产环境推荐) 或 "console" (开发环境推荐)
-	Format string `json:"format"`
-	// Output 输出目标: "stdout", "stderr", 或文件路径
-	Output string `json:"output"`
-    // ... 其他配置如 AddSource, EnableColor, Rotation 等
+    Level       string `json:"level"`        // 日志级别: debug, info, warn, error, fatal
+    Format      string `json:"format"`       // 输出格式: json 或 console
+    Output      string `json:"output"`       // 输出目标: stdout, stderr 或文件路径
+    AddSource   bool   `json:"addSource"`    // 是否添加源代码信息
+    EnableColor bool   `json:"enableColor"`  // 是否启用颜色输出
+    Rotation    struct {
+        MaxSize    int    `json:"maxSize"`    // 单个日志文件最大大小(MB)
+        MaxAge     int    `json:"maxAge"`     // 日志文件最大保存天数
+        MaxBackups int    `json:"maxBackups"` // 最大备份文件数量
+        Compress   bool   `json:"compress"`   // 是否压缩备份文件
+    } `json:"rotation"`
 }
 
-// GetDefaultConfig 返回默认的日志配置。
-// 开发环境：console 格式，debug 级别，带颜色
-// 生产环境：json 格式，info 级别，无颜色
+// GetDefaultConfig 返回环境相关的默认配置
 func GetDefaultConfig(env string) *Config
 
-// Init 初始化全局默认的日志器。
-// 这是最常用的方式，通常在服务的 main 函数中调用一次。
-// ctx: 仅用于控制本次初始化过程的上下文。Logger 实例本身不会持有此上下文。
-// opts: 一系列功能选项，如 WithNamespace()，用于定制 Logger 的行为。
-func Init(ctx context.Context, config *Config, opts ...Option) error
-
-// New 创建一个独立的、可自定义的 Logger 实例。
-// 这在需要将日志输出到不同位置或使用不同格式的特殊场景下很有用。
-// ctx: 仅用于控制本次初始化过程的上下文。Logger 实例本身不会持有此上下文。
-// opts: 一系列功能选项，如 WithNamespace()，用于定制 Logger 的行为。
-func New(ctx context.Context, config *Config, opts ...Option) (Logger, error)
-```
-
-### 2.2 功能选项 (Options)
-
-`clog` 使用 `Option` 模式来提供灵活的功能定制。
-
-```go
-// Option 是一个用于配置 Logger 实例的功能选项。
+// Option 功能选项
 type Option func(*options)
 
-// WithNamespace 为 Logger 实例设置根命名空间（通常是服务名）。
-// 这个命名空间会出现在该 Logger 实例产生的所有日志中，作为层次化标识的根节点。
-//
-// 返回值: 一个可用于 New() 或 Init() 的 Option。
+// WithNamespace 设置根命名空间
 func WithNamespace(name string) Option
+
+// WithLogger 注入日志依赖（用于内部组件）
+func WithLogger(logger Logger) Option
+
+// WithCoordProvider 注入配置中心依赖，用于动态配置管理
+func WithCoordProvider(coord coord.Provider) Option
+
+// New 创建 clog Provider 实例
+func New(ctx context.Context, config *Config, opts ...Option) (Provider, error)
+
+// Init 初始化全局默认日志器
+func Init(ctx context.Context, config *Config, opts ...Option) error
 ```
 
-### 2.3 Logger 接口
-
-`Logger` 接口定义了日志记录的核心操作。全局方法和 `Namespace()`、`C()` 返回的实例都实现了此接口。
+### 2.2 Provider 接口设计
 
 ```go
-// Logger 定义了日志记录器的核心接口。
+// Provider 是 clog 组件的主接口
+type Provider interface {
+    // WithContext 从 context 中获取带 trace_id 的日志器
+    WithContext(ctx context.Context) Logger
+    // WithTraceID 将 trace_id 注入到 context 中
+    WithTraceID(ctx context.Context, traceID string) context.Context
+    // Namespace 创建带命名空间的日志器
+    Namespace(name string) Logger
+    // Close 关闭 Provider，释放资源
+    Close() error
+}
+
+// Logger 定义了日志记录器的核心接口
 type Logger interface {
-	Debug(msg string, fields ...Field)
-	Info(msg string, fields ...Field)
-	Warn(msg string, fields ...Field)
-	Error(msg string, fields ...Field)
-	Fatal(msg string, fields ...Field) // 会导致程序退出
-	
-	// Namespace 创建一个子命名空间的 Logger 实例，支持链式调用。
-	// 子命名空间会与父命名空间组合形成完整的层次化路径。
-	Namespace(name string) Logger
-}
-
-// Field 是一个强类型的键值对，用于结构化日志。
-// clog 直接暴露了 zap.Field 的所有构造函数，如 clog.String, clog.Int, clog.Err 等。
-type Field = zap.Field
-```
-
-### 2.4 上下文与命名空间
-
-```go
-// WithContext 从 context 中获取一个 Logger 实例。
-// 如果 ctx 中包含 trace_id，返回的 Logger 会自动在每条日志中添加 "trace_id" 字段。
-// 这是在处理请求的函数中进行日志记录的【首选方式】。
-func WithContext(ctx context.Context) Logger
-
-// WithTraceID 将一个 trace_id 注入到 context 中，并返回一个新的 context。
-// 这个函数通常在请求入口处（如 gRPC 拦截器或 HTTP 中间件）调用。
-func WithTraceID(ctx context.Context, traceID string) context.Context
-
-// Namespace 创建一个带有层次化命名空间的 Logger 实例。
-// 支持链式调用来构建深层的命名空间路径，如 "service.module.component"。
-// 这是区分不同业务模块或分层的推荐方式。
-func Namespace(name string) Logger
-
-// 为了保持向后兼容，提供简短别名
-var C = WithContext  // C(ctx) 等价于 WithContext(ctx)
-```
-
-#### 设计理念：层次化命名空间系统
-
-`clog` 采用**层次化命名空间**的设计理念，将日志标识统一为可组合的命名空间系统：
-
-- **根命名空间**: 通过 `WithNamespace()` 在初始化时设置，通常是服务名
-- **子命名空间**: 通过 `Namespace()` 方法创建，可以表示业务模块、功能组件等
-- **层次组合**: 支持链式调用，形成如 `"im-gateway.user.auth"` 的完整路径
-
-这种设计消除了功能重复，提供了清晰的概念模型和一致的 API 体验。
-
-#### 设计注记：为何提供 `WithTraceID`?
-
-一个合理的设计问题是：为何 `clog` 要提供 `WithTraceID` 来"写"上下文，而不是让调用者自己管理？
-
-答案是：**为了实现完美的封装和提供类型安全的、统一的 API**。
-
-- **封装**: `WithTraceID` 将用于存储 `trace_id` 的 `context.key` 作为包内私有变量，避免了将这个实现细节泄露给外部。这是 Go 社区处理上下文传递的**最佳实践**。
-- **API 完整性**: 提供 `WithTraceID` 和 `C` (Get) 形成了一套完整、对称的 API，所有与日志上下文相关的操作都内聚在 `clog` 包内，职责清晰。
-
-## 3. 标准用法
-
-### 场景 1: 在服务启动时初始化全局 Logger
-
-```go
-// 在 main.go 中
-func main() {
-    // 使用默认配置（推荐）
-    config := clog.GetDefaultConfig("production") // 或 "development"
+    Debug(msg string, fields ...Field)
+    Info(msg string, fields ...Field)
+    Warn(msg string, fields ...Field)
+    Error(msg string, fields ...Field)
+    Fatal(msg string, fields ...Field)
     
-    // 初始化全局 logger
-    if err := clog.Init(context.Background(), config, clog.WithNamespace("im-gateway")); err != nil {
-        log.Fatalf("初始化 clog 失败: %v", err)
-    }
+    // Namespace 创建子命名空间
+    Namespace(name string) Logger
+}
 
-    clog.Info("服务启动成功") // 输出: {"namespace": "im-gateway", "msg": "服务启动成功"}
+// Field 是结构化日志的字段类型
+type Field = zap.Field
+
+// 标准字段构造函数
+func String(key, val string) Field
+func Int(key string, val int) Field
+func Int64(key string, val int64) Field
+func Float64(key string, val float64) Field
+func Bool(key string, val bool) Field
+func Time(key string, val time.Time) Field
+func Err(err error) Field
+func Any(key string, val interface{}) Field
+```
+
+### 2.3 动态配置支持
+
+```go
+// WatchConfig 监听配置变更
+func (p *clogProvider) watchConfigChanges(ctx context.Context) {
+    if p.coord == nil {
+        return
+    }
+    
+    configPath := "/config/clog/"
+    watcher, err := p.coord.Config().WatchPrefix(ctx, configPath, &p.config)
+    if err != nil {
+        p.logger.Error("监听 clog 配置失败", clog.Err(err))
+        return
+    }
+    
+    go func() {
+        for range watcher.Changes() {
+            p.updateLogger()
+        }
+    }()
+}
+
+func (p *clogProvider) updateLogger() {
+    // 根据新配置重新创建日志器
+    newLogger := p.createLogger(p.config)
+    
+    // 原子性地更新日志器引用
+    atomic.StorePointer(&p.loggerPtr, unsafe.Pointer(&newLogger))
+    
+    p.logger.Info("clog 配置已更新")
 }
 ```
 
-### 场景 2: 在 Gin 中间件中集成
+## 3. 实现要点
+
+### 3.1 层次化命名空间实现
 
 ```go
-import (
-    "github.com/gin-gonic/gin"
-    "github.com/google/uuid"
-    "github.com/ceyewan/gochat/im-infra/clog"
-)
+type namespacedLogger struct {
+    provider *clogProvider
+    namespace string
+}
 
-// TraceMiddleware 处理链路追踪 ID
+func (n *namespacedLogger) Namespace(name string) Logger {
+    // 支持链式调用，构建深层命名空间
+    if n.namespace == "" {
+        return &namespacedLogger{
+            provider: n.provider,
+            namespace: name,
+        }
+    }
+    return &namespacedLogger{
+        provider: n.provider,
+        namespace: n.namespace + "." + name,
+    }
+}
+
+func (n *namespacedLogger) Info(msg string, fields ...Field) {
+    // 自动添加命名空间字段
+    namespaceField := zap.String("namespace", n.getFullNamespace())
+    fields = append([]Field{namespaceField}, fields...)
+    
+    // 获取实际的 zap.Logger 并记录
+    logger := n.provider.getLogger()
+    logger.Info(msg, fields...)
+}
+
+func (n *namespacedLogger) getFullNamespace() string {
+    // 组合根命名空间和子命名空间
+    if n.provider.rootNamespace != "" {
+        return n.provider.rootNamespace + "." + n.namespace
+    }
+    return n.namespace
+}
+```
+
+### 3.2 上下文与链路追踪实现
+
+```go
+// traceIDKey 是 context 中存储 trace_id 的键
+type traceIDKey struct{}
+
+// WithTraceID 将 trace_id 注入到 context
+func (p *clogProvider) WithTraceID(ctx context.Context, traceID string) context.Context {
+    return context.WithValue(ctx, traceIDKey{}, traceID)
+}
+
+// WithContext 从 context 中提取 trace_id 并创建日志器
+func (p *clogProvider) WithContext(ctx context.Context) Logger {
+    // 获取 trace_id
+    traceID, _ := ctx.Value(traceIDKey{}).(string)
+    
+    // 创建基础日志器
+    logger := p.Namespace("")
+    
+    // 如果有 trace_id，添加到所有日志中
+    if traceID != "" {
+        return logger.With(zap.String("trace_id", traceID))
+    }
+    
+    return logger
+}
+```
+
+### 3.3 日志器创建与管理
+
+```go
+type clogProvider struct {
+    config         *Config
+    rootNamespace  string
+    loggerPtr      unsafe.Pointer // 原子指针，用于动态更新
+    coord          coord.Provider
+    logger         clog.Logger
+}
+
+func (p *clogProvider) createLogger(config *Config) *zap.Logger {
+    // 创建 zap 配置
+    zapConfig := zap.NewProductionConfig()
+    
+    // 根据配置调整
+    if config.Format == "console" {
+        zapConfig = zap.NewDevelopmentConfig()
+    }
+    
+    zapConfig.Level = zap.NewAtomicLevelAt(parseLevel(config.Level))
+    zapConfig.OutputPaths = []string{config.Output}
+    zapConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+    
+    // 创建日志器
+    logger, _ := zapConfig.Build()
+    return logger
+}
+
+func (p *clogProvider) getLogger() *zap.Logger {
+    // 原子性地获取当前日志器
+    return (*zap.Logger)(atomic.LoadPointer(&p.loggerPtr))
+}
+```
+
+## 4. 标准用法示例
+
+### 4.1 基础初始化
+
+```go
+func main() {
+    ctx := context.Background()
+    
+    // 1. 初始化日志组件
+    config := clog.GetDefaultConfig("production")
+    config.Output = "/var/log/app.log"
+    
+    clogProvider, err := clog.New(ctx, config,
+        clog.WithNamespace("user-service"),
+        clog.WithCoordProvider(coordProvider), // 可选，用于动态配置
+    )
+    if err != nil {
+        log.Fatal("clog 初始化失败:", err)
+    }
+    defer clogProvider.Close()
+    
+    // 或者使用全局初始化
+    if err := clog.Init(ctx, config, clog.WithNamespace("user-service")); err != nil {
+        log.Fatal("clog 初始化失败:", err)
+    }
+}
+```
+
+### 4.2 在 HTTP 中间件中使用
+
+```go
 func TraceMiddleware() gin.HandlerFunc {
     return func(c *gin.Context) {
         // 1. 获取或生成 traceID
         traceID := c.GetHeader("X-Trace-ID")
         if traceID == "" {
-            traceID = uuid.NewString()
+            traceID = uuid.New().String()
         }
-
-        // 2. 注入到 context（clog 核心用法）
+        
+        // 2. 注入到 context
         ctx := clog.WithTraceID(c.Request.Context(), traceID)
         c.Request = c.Request.WithContext(ctx)
         
@@ -206,168 +290,228 @@ func TraceMiddleware() gin.HandlerFunc {
     }
 }
 
-// 业务处理函数
-func createUser(c *gin.Context) {
-    // 3. 从 context 获取带 traceID 的 logger（clog 核心用法）
-    logger := clog.WithContext(c.Request.Context())
+func (s *UserService) GetUser(c *gin.Context) {
+    ctx := c.Request.Context()
+    logger := clog.WithContext(ctx)
     
-    logger.Info("开始创建用户请求")
-    
-    // 调用服务层，传递 context
-    user, err := userService.CreateUser(c.Request.Context(), req)
+    user, err := s.userRepo.GetUser(ctx, c.Param("id"))
     if err != nil {
-        logger.Error("创建用户失败", clog.Err(err))
+        logger.Error("获取用户失败", 
+            clog.String("user_id", c.Param("id")),
+            clog.Err(err))
+        c.JSON(500, gin.H{"error": "获取用户失败"})
         return
     }
     
-    logger.Info("用户创建成功", clog.String("user_id", user.ID))
+    logger.Info("获取用户成功", clog.String("user_id", user.ID))
+    c.JSON(200, user)
 }
 ```
 
-### 场景 3: 在 gRPC 拦截器中集成
+### 4.3 层次化命名空间使用
 
 ```go
-func UnaryTraceServerInterceptor() grpc.UnaryServerInterceptor {
-    return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
-        // 1. 从 metadata 提取 traceID
-        var traceID string
-        if md, ok := metadata.FromIncomingContext(ctx); ok {
-            if vals := md.Get("x-trace-id"); len(vals) > 0 {
-                traceID = vals[0]
-            }
-        }
-        if traceID == "" {
-            traceID = uuid.NewString()
-        }
-
-        // 2. 注入到 context（clog 核心用法）
-        ctx = clog.WithTraceID(ctx, traceID)
-
-        return handler(ctx, req)
-    }
-}
-```
-
-### 场景 4: 在业务逻辑中使用上下文日志
-
-```go
-func (s *MessageService) SendMessage(ctx context.Context, req *pb.SendMessageRequest) (*pb.SendMessageResponse, error) {
-    // 从 context 获取带 traceID 的 logger（clog 核心用法）
+func (s *OrderService) ProcessOrder(ctx context.Context, orderID string) error {
     logger := clog.WithContext(ctx)
-
-    logger.Info("开始处理发送消息请求",
-        clog.String("sender_id", req.SenderID),
-        clog.String("receiver_id", req.ReceiverID))
-
-    // 业务逻辑...
-    if err != nil {
-        logger.Error("发送消息失败", clog.Err(err))
-        return nil, err
-    }
-
-    logger.Info("成功发送消息")
-    return &pb.SendMessageResponse{}, nil
-}
-```
-
-### 场景 5: 层次化命名空间的使用
-
-```go
-func (s *UserService) HandleUserRegistration(ctx context.Context, req *RegisterRequest) error {
-    // 创建不同层次的命名空间 logger（clog 核心用法）
-    userLogger := clog.Namespace("user")
-    authLogger := userLogger.Namespace("auth")
-    dbLogger := userLogger.Namespace("database")
     
-    userLogger.Info("开始用户注册流程", clog.String("email", req.Email))
+    // 创建不同层次的命名空间
+    orderLogger := logger.Namespace("order")
+    paymentLogger := orderLogger.Namespace("payment")
+    inventoryLogger := orderLogger.Namespace("inventory")
     
-    authLogger.Info("验证用户密码强度")
-    if !s.validatePassword(req.Password) {
-        authLogger.Warn("密码强度不足")
-        return errors.New("密码强度不足")
-    }
+    orderLogger.Info("开始处理订单", clog.String("order_id", orderID))
     
-    dbLogger.Info("检查用户是否已存在")
-    exists, err := s.userRepo.UserExists(ctx, req.Email)
-    if err != nil {
-        dbLogger.Error("查询用户失败", clog.Err(err))
+    // 支付处理
+    if err := s.processPayment(ctx, orderID); err != nil {
+        paymentLogger.Error("支付处理失败", clog.Err(err))
         return err
     }
     
-    userLogger.Info("用户注册成功")
-    return nil
-}
-```
-
-**日志输出示例**:
-```json
-{"namespace": "im-gateway.user", "trace_id": "abc123", "msg": "开始用户注册流程"}
-{"namespace": "im-gateway.user.auth", "trace_id": "abc123", "msg": "验证用户密码强度"}
-{"namespace": "im-gateway.user.database", "trace_id": "abc123", "msg": "检查用户是否已存在"}
-```
-
-### 场景 6: 链式命名空间创建
-
-```go
-func (s *PaymentService) ProcessPayment(ctx context.Context, req *PaymentRequest) error {
-    // 链式创建深层命名空间（clog 核心用法）
-    paymentLogger := clog.Namespace("payment").Namespace("processor").Namespace("stripe")
+    // 库存检查
+    if err := s.checkInventory(ctx, orderID); err != nil {
+        inventoryLogger.Error("库存检查失败", clog.Err(err))
+        return err
+    }
     
-    paymentLogger.Info("开始处理支付请求", clog.String("order_id", req.OrderID))
+    orderLogger.Info("订单处理成功", clog.String("order_id", orderID))
     return nil
 }
 ```
 
-**输出结果**: `"namespace": "im-gateway.payment.processor.stripe"`
+### 4.4 错误处理和调试
 
-## 4. 设计优势总结
-
-### 4.1 层次化命名空间的核心价值
-
-通过引入层次化命名空间系统，`clog` 实现了以下设计目标：
-
-#### **消除功能重复**
-- **Before**: `WithService("im-gateway")` + `Module("user")` → 两套相似API
-- **After**: `WithNamespace("im-gateway")` + `Namespace("user")` → 统一的层次化API
-
-#### **提供组合灵活性**
 ```go
-// 可根据需要创建任意层次的标识
-baseLogger := clog.Namespace("user")                    // "im-gateway.user"
-authLogger := baseLogger.Namespace("auth")              // "im-gateway.user.auth" 
-passwordLogger := authLogger.Namespace("password")      // "im-gateway.user.auth.password"
-```
-
-#### **概念清晰化**
-- **统一概念**: 所有标识都是"命名空间"，避免 service vs module 的概念混淆
-- **自然层次**: 如文件系统路径般直观的层次关系
-- **一致API**: 所有层次都使用相同的 `Namespace()` 方法
-
-#### **可观测性增强**
-```json
-{
-  "namespace": "im-gateway.user.auth.password",
-  "trace_id": "abc123-def456",
-  "msg": "密码验证成功",
-  "user_id": "12345"
+func (s *UserService) CreateUser(ctx context.Context, req *CreateUserRequest) (*User, error) {
+    logger := clog.WithContext(ctx).Namespace("user").Namespace("create")
+    
+    logger.Info("开始创建用户", 
+        clog.String("email", req.Email),
+        clog.String("username", req.Username))
+    
+    // 验证输入
+    if err := validateUserRequest(req); err != nil {
+        logger.Warn("用户请求验证失败", clog.Err(err))
+        return nil, fmt.Errorf("验证失败: %w", err)
+    }
+    
+    // 检查用户是否存在
+    exists, err := s.userRepo.UserExists(ctx, req.Email)
+    if err != nil {
+        logger.Error("检查用户存在性失败", clog.Err(err))
+        return nil, fmt.Errorf("检查用户失败: %w", err)
+    }
+    
+    if exists {
+        logger.Warn("用户已存在", clog.String("email", req.Email))
+        return nil, fmt.Errorf("用户已存在")
+    }
+    
+    // 创建用户
+    user, err := s.userRepo.CreateUser(ctx, req)
+    if err != nil {
+        logger.Error("创建用户失败", clog.Err(err))
+        return nil, fmt.Errorf("创建用户失败: %w", err)
+    }
+    
+    logger.Info("用户创建成功", 
+        clog.String("user_id", user.ID),
+        clog.String("email", user.Email))
+    
+    return user, nil
 }
 ```
 
-通过完整的命名空间路径，运维人员可以：
-- **快速定位**: 立即知道日志来自哪个服务的哪个模块的哪个组件
-- **精确过滤**: 按任意层次进行日志查询和分析
-- **链路追踪**: 结合 trace_id 实现完整的请求链路可视化
+## 5. 性能优化
 
-### 4.2 与传统方案的对比
+### 5.1 零内存分配
 
-| 维度 | 传统方案 | 层次化命名空间 |
-|------|----------|---------------|
-| **API数量** | 2套API (WithService + Module) | 1套API (WithNamespace + Namespace) |
-| **概念复杂度** | 高 (service vs module 边界模糊) | 低 (统一的命名空间概念) |
-| **扩展性** | 差 (固定的两层结构) | 强 (任意层次的嵌套) |
-| **一致性** | 差 (Option vs 直接方法) | 高 (一致的调用方式) |
-| **可读性** | 中 (需要理解两套概念) | 高 (自然的层次结构) |
+```go
+// 使用对象池减少内存分配
+var fieldPool = sync.Pool{
+    New: func() interface{} {
+        return make([]Field, 0, 10)
+    },
+}
 
-这种设计体现了 **"简单的概念 + 组合的力量 = 强大的表达能力"** 的设计哲学。
+func (n *namespacedLogger) Info(msg string, fields ...Field) {
+    // 从池中获取字段切片
+    pooledFields := fieldPool.Get().([]Field)
+    defer func() {
+        // 重置并归还到池中
+        pooledFields = pooledFields[:0]
+        fieldPool.Put(pooledFields)
+    }()
+    
+    // 添加命名空间字段
+    pooledFields = append(pooledFields, zap.String("namespace", n.getFullNamespace()))
+    pooledFields = append(pooledFields, fields...)
+    
+    // 获取实际的 zap.Logger 并记录
+    logger := n.provider.getLogger()
+    logger.Info(msg, pooledFields...)
 }
 ```
+
+### 5.2 异步日志输出
+
+```go
+func createLogger(config *Config) *zap.Logger {
+    zapConfig := zap.NewProductionConfig()
+    
+    // 启用异步输出以提高性能
+    zapConfig.OutputPaths = []string{"stdout"}
+    zapConfig.ErrorOutputPaths = []string{"stderr"}
+    
+    // 根据环境调整缓冲区大小
+    if os.Getenv("GO_ENV") == "production" {
+        zapConfig.EncoderConfig.TimeKey = "timestamp"
+    }
+    
+    logger, _ := zapConfig.Build()
+    return logger
+}
+```
+
+## 6. 监控与维护
+
+### 6.1 日志健康检查
+
+```go
+func (p *clogProvider) HealthCheck(ctx context.Context) error {
+    // 检查日志器是否正常工作
+    logger := p.getLogger()
+    
+    // 尝试写入测试日志
+    if err := logger.Sync(); err != nil {
+        return fmt.Errorf("日志同步失败: %w", err)
+    }
+    
+    // 检查配置中心连接
+    if p.coord != nil {
+        if err := p.coord.Ping(ctx); err != nil {
+            return fmt.Errorf("配置中心连接失败: %w", err)
+        }
+    }
+    
+    return nil
+}
+```
+
+### 6.2 日志轮转和清理
+
+```go
+func (p *clogProvider) setupRotation(config *Config) {
+    if config.Output == "stdout" || config.Output == "stderr" {
+        return
+    }
+    
+    // 创建日志轮转配置
+    rotationConfig := rotatelogs.Config{
+        Path:         config.Output,
+        RotationTime: time.Hour,
+        MaxAge:       time.Duration(config.Rotation.MaxAge) * 24 * time.Hour,
+        Rotator:      rotatelogs.NewDefaultRotator(),
+    }
+    
+    // 设置轮转钩子
+    logger := p.getLogger()
+    logger = logger.WithOptions(zap.Hooks(func(entry zapcore.Entry) error {
+        // 在日志轮转时执行清理操作
+        return nil
+    }))
+}
+```
+
+## 7. 最佳实践
+
+### 7.1 日志级别使用
+
+- **DEBUG**: 详细的调试信息，仅在开发环境使用
+- **INFO**: 重要的业务事件和状态变化
+- **WARN**: 潜在问题，不影响正常运行
+- **ERROR**: 错误情况，需要关注但可以恢复
+- **FATAL**: 严重错误，导致程序无法继续运行
+
+### 7.2 结构化日志字段
+
+```go
+// 推荐的字段命名规范
+logger.Info("用户登录成功", 
+    clog.String("user_id", "12345"),
+    clog.String("username", "john_doe"),
+    clog.String("ip_address", "192.168.1.100"),
+    clog.String("user_agent", "Mozilla/5.0..."),
+    clog.Time("login_time", time.Now()),
+)
+```
+
+### 7.3 性能考虑
+
+- **避免高频日志**: 生产环境避免使用 DEBUG 级别
+- **合理使用字段**: 只记录必要的信息，避免过多字段
+- **异步处理**: 启用异步日志输出以提高性能
+- **资源监控**: 监控日志文件大小和磁盘使用情况
+
+---
+
+*遵循这些指南可以确保日志组件的高质量实现和稳定运行。*

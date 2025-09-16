@@ -1,942 +1,896 @@
-# 使用 `im-infra` 组件
+# GoChat Kit 使用指南
 
-`im-infra` 目录包含所有微服务共享的核心基础库。本指南旨在为开发者提供清晰的指引，说明如何在业务代码中正确、高效地使用这些关键组件。
+本指南提供完整的使用示例，展示如何在典型的微服务中正确使用 GoChat Kit 的所有组件。
 
-所有组件的设计都遵循 `docs/08_infra/README.md` 中定义的核心规范。
+## 架构概览
 
----
-## 统一初始化：典型服务 `main.go`
+GoChat Kit 遵循以下核心设计原则：
 
-本章节提供一个**生产级别的 `main` 函数**示例，展示如何在一个典型的微服务（如 `message-service`）中，按正确的依赖顺序，一次性初始化所有需要的 `im-infra` 组件。这是上手 `im-infra` 的**黄金路径**和**最佳实践**。
+- **Provider 模式**：所有组件都通过统一的 Provider 接口提供
+- **标准构造函数**：`func New(ctx context.Context, config *Config, opts ...Option) (Provider, error)`
+- **默认配置**：`func GetDefaultConfig(env string) *Config`
+- **配置分离**：config 用于核心配置，opts 用于依赖注入
+- **组件自治**：内部监听配置变化，实现热更新
+- **上下文感知**：所有 I/O 操作都接受 context.Context 作为第一个参数
+
+## 统一初始化：典型服务架构
 
 ```go
 package main
 
 import (
-	"context"
-	"log"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
+    "context"
+    "log"
+    "os"
+    "os/signal"
+    "syscall"
+    "time"
 
-	"github.com/ceyewan/gochat/im-infra/breaker"
-	"github.com/ceyewan/gochat/im-infra/cache"
-	"github.com/ceyewan/gochat/im-infra/clog"
-	"github.com/ceyewan/gochat/im-infra/coord"
-	"github.com/ceyewan/gochat/im-infra/db"
-	"github.com/ceyewan/gochat/im-infra/es"
-	"github.com/ceyewan/gochat/im-infra/metrics"
-	"github.com/ceyewan/gochat/im-infra/mq"
-	"github.com/ceyewan/gochat/im-infra/once"
-	"github.com/ceyewan/gochat/im-infra/ratelimit"
-	"github.com/ceyewan/gochat/im-infra/uid"
+    "github.com/gochat-kit/breaker"
+    "github.com/gochat-kit/cache"
+    "github.com/gochat-kit/clog"
+    "github.com/gochat-kit/coord"
+    "github.com/gochat-kit/db"
+    "github.com/gochat-kit/es"
+    "github.com/gochat-kit/metrics"
+    "github.com/gochat-kit/mq"
+    "github.com/gochat-kit/once"
+    "github.com/gochat-kit/ratelimit"
+    "github.com/gochat-kit/uid"
 )
 
 const (
-	serviceName = "message-service"
-	environment = "production" // "development" or "production"
+    serviceName = "message-service"
+    environment = "production"
 )
 
 func main() {
-	// --- 1. 基础组件初始化 (无依赖或仅依赖 context) ---
+    // --- 1. 基础组件初始化 ---
+    
+    // 初始化日志组件
+    clogConfig := clog.GetDefaultConfig(environment)
+    clogConfig.ServiceName = serviceName
+    logger := clog.New(context.Background(), clogConfig)
+    
+    logger.Info("服务开始启动...")
 
-	// 初始化日志 (clog)
-	clogConfig := clog.GetDefaultConfig(environment)
-	if err := clog.Init(context.Background(), clogConfig, clog.WithNamespace(serviceName)); err != nil {
-		log.Fatalf("初始化 clog 失败: %v", err)
-	}
-	clog.Info("服务开始启动...")
+    // 初始化监控组件
+    metricsConfig := metrics.GetDefaultConfig(serviceName, environment)
+    metricsConfig.PrometheusListenAddr = ":9090"
+    metricsConfig.ExporterEndpoint = "http://jaeger:14268/api/traces"
+    metricsProvider, err := metrics.New(context.Background(), metricsConfig,
+        metrics.WithLogger(logger),
+    )
+    if err != nil {
+        logger.Fatal("初始化 metrics 失败", clog.Err(err))
+    }
+    defer metricsProvider.Shutdown(context.Background())
+    logger.Info("metrics Provider 初始化成功")
 
-	// 初始化可观测性 (metrics)
-	metricsConfig := metrics.GetDefaultConfig(serviceName, environment)
-	metricsProvider, err := metrics.New(context.Background(), metricsConfig,
-		metrics.WithLogger(clog.Namespace("metrics")),
-	)
-	if err != nil {
-		clog.Fatal("初始化 metrics 失败", clog.Err(err))
-	}
-	defer metricsProvider.Shutdown(context.Background())
-	clog.Info("metrics Provider 初始化成功")
+    // --- 2. 核心依赖组件初始化 ---
+    
+    // 初始化分布式协调组件
+    coordConfig := coord.GetDefaultConfig(environment)
+    coordConfig.Endpoints = []string{"etcd1:2379", "etcd2:2379", "etcd3:2379"}
+    coordProvider, err := coord.New(context.Background(), coordConfig,
+        coord.WithLogger(logger),
+    )
+    if err != nil {
+        logger.Fatal("初始化 coord 失败", clog.Err(err))
+    }
+    defer coordProvider.Close()
+    logger.Info("coord Provider 初始化成功")
 
-	// --- 2. 核心依赖组件初始化 (依赖 clog) ---
+    // --- 3. 上层组件初始化 ---
+    
+    // 初始化缓存组件
+    cacheConfig := cache.GetDefaultConfig(environment)
+    cacheConfig.Addr = "redis-cluster:6379"
+    cacheProvider, err := cache.New(context.Background(), cacheConfig,
+        cache.WithLogger(logger),
+        cache.WithCoordProvider(coordProvider),
+    )
+    if err != nil {
+        logger.Fatal("初始化 cache 失败", clog.Err(err))
+    }
+    defer cacheProvider.Close()
+    logger.Info("cache Provider 初始化成功")
 
-	// 初始化分布式协调 (coord)
-	coordConfig := coord.GetDefaultConfig(environment)
-	// coordConfig.Endpoints = []string{"etcd1:2379", "etcd2:2379", "etcd3:2379"} // 按需覆盖
-	coordProvider, err := coord.New(context.Background(), coordConfig,
-		coord.WithLogger(clog.Namespace("coord")),
-	)
-	if err != nil {
-		clog.Fatal("初始化 coord 失败", clog.Err(err))
-	}
-	defer coordProvider.Close()
-	clog.Info("coord Provider 初始化成功")
+    // 初始化数据库组件
+    dbConfig := db.GetDefaultConfig(environment)
+    dbConfig.DSN = "user:password@tcp(mysql:3306)/message_service?charset=utf8mb4&parseTime=True&loc=Local"
+    dbProvider, err := db.New(context.Background(), dbConfig,
+        db.WithLogger(logger),
+    )
+    if err != nil {
+        logger.Fatal("初始化 db 失败", clog.Err(err))
+    }
+    defer dbProvider.Close()
+    logger.Info("db Provider 初始化成功")
 
-	// --- 3. 上层组件初始化 (依赖 clog, coord, etc.) ---
+    // 初始化 UID 组件
+    uidConfig := uid.GetDefaultConfig(environment)
+    uidConfig.ServiceName = serviceName
+    uidProvider, err := uid.New(context.Background(), uidConfig,
+        uid.WithLogger(logger),
+        uid.WithCoordProvider(coordProvider),
+    )
+    if err != nil {
+        logger.Fatal("初始化 uid 失败", clog.Err(err))
+    }
+    defer uidProvider.Close()
+    logger.Info("uid Provider 初始化成功")
 
-	// 初始化缓存 (cache)
-	cacheConfig := cache.GetDefaultConfig(environment)
-	// cacheConfig.Addr = "redis-cluster:6379" // 按需覆盖
-	cacheProvider, err := cache.New(context.Background(), cacheConfig,
-		cache.WithLogger(clog.Namespace("cache")),
-		cache.WithCoordProvider(coordProvider),
-	)
-	if err != nil {
-		clog.Fatal("初始化 cache 失败", clog.Err(err))
-	}
-	defer cacheProvider.Close()
-	clog.Info("cache Provider 初始化成功")
+    // 初始化消息队列组件
+    mqConfig := mq.GetDefaultConfig(environment)
+    mqConfig.Brokers = []string{"kafka1:9092", "kafka2:9092", "kafka3:9092"}
+    mqProducer, err := mq.NewProducer(context.Background(), mqConfig,
+        mq.WithLogger(logger),
+        mq.WithCoordProvider(coordProvider),
+    )
+    if err != nil {
+        logger.Fatal("初始化 mq producer 失败", clog.Err(err))
+    }
+    defer mqProducer.Close()
+    logger.Info("mq producer 初始化成功")
 
-	// 初始化数据库 (db)
-	dbConfig := db.GetDefaultConfig(environment)
-	// dbConfig.DSN = "..." // 按需覆盖
-	dbProvider, err := db.New(context.Background(), dbConfig,
-		db.WithLogger(clog.Namespace("gorm")),
-	)
-	if err != nil {
-		clog.Fatal("初始化 db 失败", clog.Err(err))
-	}
-	defer dbProvider.Close()
-	clog.Info("db Provider 初始化成功")
+    // 初始化限流组件
+    ratelimitConfig := ratelimit.GetDefaultConfig(environment)
+    ratelimitConfig.ServiceName = serviceName
+    ratelimitConfig.RulesPath = "/config/prod/message-service/ratelimit/"
+    rateLimitProvider, err := ratelimit.New(context.Background(), ratelimitConfig,
+        ratelimit.WithLogger(logger),
+        ratelimit.WithCoordProvider(coordProvider),
+        ratelimit.WithCacheProvider(cacheProvider),
+    )
+    if err != nil {
+        logger.Fatal("初始化 ratelimit 失败", clog.Err(err))
+    }
+    defer rateLimitProvider.Close()
+    logger.Info("ratelimit Provider 初始化成功")
 
-	// 初始化唯一ID (uid)
-	uidConfig := uid.GetDefaultConfig(environment)
-	uidConfig.ServiceName = serviceName
-	uidProvider, err := uid.New(context.Background(), uidConfig,
-		uid.WithLogger(clog.Namespace("uid")),
-		uid.WithCoordProvider(coordProvider),
-	)
-	if err != nil {
-		clog.Fatal("初始化 uid 失败", clog.Err(err))
-	}
-	defer uidProvider.Close()
-	clog.Info("uid Provider 初始化成功")
+    // 初始化幂等组件
+    onceConfig := once.GetDefaultConfig(environment)
+    onceConfig.ServiceName = serviceName
+    onceProvider, err := once.New(context.Background(), onceConfig,
+        once.WithLogger(logger),
+        once.WithCacheProvider(cacheProvider),
+    )
+    if err != nil {
+        logger.Fatal("初始化 once 失败", clog.Err(err))
+    }
+    defer onceProvider.Close()
+    logger.Info("once Provider 初始化成功")
 
-	// 初始化消息队列 (mq)
-	mqConfig := mq.GetDefaultConfig(environment)
-	// mqConfig.Brokers = []string{"kafka1:9092", "kafka2:9092"} // 按需覆盖
-	mqProducer, err := mq.NewProducer(context.Background(), mqConfig,
-		mq.WithLogger(clog.Namespace("mq-producer")),
-		mq.WithCoordProvider(coordProvider),
-	)
-	if err != nil {
-		clog.Fatal("初始化 mq producer 失败", clog.Err(err))
-	}
-	defer mqProducer.Close()
-	clog.Info("mq producer 初始化成功")
+    // 初始化熔断器组件
+    breakerConfig := breaker.GetDefaultConfig(serviceName, environment)
+    breakerConfig.PoliciesPath = "/config/prod/message-service/breakers/"
+    breakerProvider, err := breaker.New(context.Background(), breakerConfig,
+        breaker.WithLogger(logger),
+        breaker.WithCoordProvider(coordProvider),
+    )
+    if err != nil {
+        logger.Fatal("初始化 breaker 失败", clog.Err(err))
+    }
+    defer breakerProvider.Close()
+    logger.Info("breaker Provider 初始化成功")
 
-	// 初始化限流 (ratelimit)
-	ratelimitConfig := ratelimit.GetDefaultConfig(environment)
-	ratelimitConfig.ServiceName = serviceName
-	// ratelimitConfig.RulesPath = "/config/prod/message-service/ratelimit/" // 按需覆盖
-	rateLimitProvider, err := ratelimit.New(context.Background(), ratelimitConfig,
-		ratelimit.WithLogger(clog.Namespace("ratelimit")),
-		ratelimit.WithCoordProvider(coordProvider),
-		ratelimit.WithCacheProvider(cacheProvider),
-	)
-	if err != nil {
-		clog.Fatal("初始化 ratelimit 失败", clog.Err(err))
-	}
-	defer rateLimitProvider.Close()
-	clog.Info("ratelimit Provider 初始化成功")
+    // 初始化搜索引擎组件
+    esConfig := es.GetDefaultConfig(environment)
+    esConfig.Addresses = []string{"http://elasticsearch:9200"}
+    esProvider, err := es.New(context.Background(), esConfig,
+        es.WithLogger(logger),
+    )
+    if err != nil {
+        logger.Fatal("初始化 es 失败", clog.Err(err))
+    }
+    defer esProvider.Close()
+    logger.Info("es Provider 初始化成功")
 
-	// 初始化幂等 (once)
-	onceConfig := once.GetDefaultConfig(environment)
-	onceConfig.ServiceName = serviceName
-	onceProvider, err := once.New(context.Background(), onceConfig,
-		once.WithLogger(clog.Namespace("once")),
-		once.WithCacheProvider(cacheProvider),
-	)
-	if err != nil {
-		clog.Fatal("初始化 once 失败", clog.Err(err))
-	}
-	defer onceProvider.Close()
-	clog.Info("once Provider 初始化成功")
+    // --- 4. 启动业务服务 ---
+    messageSvc := NewMessageService(
+        dbProvider, 
+        cacheProvider, 
+        mqProducer, 
+        uidProvider, 
+        rateLimitProvider, 
+        onceProvider, 
+        breakerProvider, 
+        esProvider,
+        logger,
+    )
+    
+    // 启动 gRPC/HTTP 服务器
+    go func() {
+        if err := messageSvc.Start(); err != nil {
+            logger.Fatal("服务启动失败", clog.Err(err))
+        }
+    }()
+    
+    logger.Info("所有组件初始化完毕，服务正在运行...")
 
-	// 初始化熔断器 (breaker)
-	breakerConfig := breaker.GetDefaultConfig(serviceName, environment)
-	breakerProvider, err := breaker.New(context.Background(), breakerConfig,
-		breaker.WithLogger(clog.Namespace("breaker")),
-		breaker.WithCoordProvider(coordProvider),
-	)
-	if err != nil {
-		clog.Fatal("初始化 breaker 失败", clog.Err(err))
-	}
-	defer breakerProvider.Close()
-	clog.Info("breaker Provider 初始化成功")
+    // --- 5. 优雅关闭 ---
+    quit := make(chan os.Signal, 1)
+    signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+    <-quit
+    logger.Warn("服务开始关闭...")
 
-	// 初始化消息索引 (es)
-	esConfig := es.GetDefaultConfig(environment)
-	// esConfig.Addresses = []string{"http://es1:9200"} // 按需覆盖
-	esProvider, err := es.New(context.Background(), esConfig,
-		es.WithLogger(clog.Namespace("es")),
-	)
-	if err != nil {
-		clog.Fatal("初始化 es 失败", clog.Err(err))
-	}
-	defer esProvider.Close()
-	clog.Info("es Provider 初始化成功")
+    if err := messageSvc.Stop(); err != nil {
+        logger.Error("服务关闭失败", clog.Err(err))
+    }
 
-	// --- 4. 启动业务服务 ---
-	// ... 在这里，将初始化好的 providers 注入到你的业务服务中 ...
-	// e.g., messageSvc := service.NewMessageService(dbProvider, cacheProvider, mqProducer, ...)
-	// ... 启动 gRPC/HTTP 服务器 ...
-	clog.Info("所有组件初始化完毕，服务正在运行...")
-
-	// --- 5. 优雅关闭 ---
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	clog.Warn("服务开始关闭...")
-
-	// defer 调用会自动执行，以相反的顺序关闭所有组件
-	clog.Info("服务已优雅关闭")
+    logger.Info("服务已优雅关闭")
 }
 ```
 
+## 1. 结构化日志 (clog)
+
+### 基础用法
+
+```go
+// 在业务逻辑中使用
+func (s *UserService) GetUser(ctx context.Context, userID string) (*User, error) {
+    logger := clog.WithContext(ctx)
+    userLogger := logger.Namespace("get_user")
+    
+    userLogger.Info("开始获取用户信息", clog.String("user_id", userID))
+    
+    user, err := s.userRepo.GetUser(ctx, userID)
+    if err != nil {
+        userLogger.Error("获取用户信息失败", clog.Err(err))
+        return nil, err
+    }
+    
+    userLogger.Info("成功获取用户信息")
+    return user, nil
+}
+```
+
+### 中间件集成
+
+```go
+// HTTP 中间件
+func TraceMiddleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        traceID := c.GetHeader("X-Trace-ID")
+        if traceID == "" {
+            traceID = uuid.New().String()
+        }
+        
+        ctx := clog.WithTraceID(c.Request.Context(), traceID)
+        c.Request = c.Request.WithContext(ctx)
+        c.Header("X-Trace-ID", traceID)
+        
+        c.Next()
+    }
+}
+```
+
+## 2. 分布式缓存 (cache)
+
+### 缓存用户信息
+
+```go
+func (s *UserService) GetUserProfile(ctx context.Context, userID string) (*Profile, error) {
+    logger := clog.WithContext(ctx)
+    key := fmt.Sprintf("user:%s:profile", userID)
+    
+    // 尝试从缓存获取
+    profileJSON, err := s.cache.String().Get(ctx, key)
+    if err == nil {
+        var profile Profile
+        if json.Unmarshal([]byte(profileJSON), &profile) == nil {
+            logger.Info("用户资料缓存命中", clog.String("user_id", userID))
+            return &profile, nil
+        }
+    }
+    
+    // 缓存未命中，从数据库获取
+    profile, err := s.getUserFromDB(ctx, userID)
+    if err != nil {
+        return nil, err
+    }
+    
+    // 写入缓存
+    profileData, _ := json.Marshal(profile)
+    if err := s.cache.String().Set(ctx, key, profileData, time.Hour); err != nil {
+        logger.Error("写入缓存失败", clog.Err(err))
+    }
+    
+    return profile, nil
+}
+```
+
+### 分布式锁使用
+
+```go
+func (s *OrderService) ProcessOrder(ctx context.Context, orderID string) error {
+    logger := clog.WithContext(ctx)
+    
+    // 获取分布式锁
+    lock, err := s.cache.Lock().Acquire(ctx, fmt.Sprintf("lock:order:%s", orderID), 30*time.Second)
+    if err != nil {
+        return fmt.Errorf("获取订单处理锁失败: %w", err)
+    }
+    defer lock.Unlock(ctx)
+    
+    logger.Info("开始处理订单", clog.String("order_id", orderID))
+    
+    // 处理订单逻辑
+    if err := s.processOrderLogic(ctx, orderID); err != nil {
+        return fmt.Errorf("处理订单失败: %w", err)
+    }
+    
+    logger.Info("订单处理完成", clog.String("order_id", orderID))
+    return nil
+}
+```
+
+## 3. 唯一 ID 生成 (uid)
+
+### 生成业务 ID
+
+```go
+func (s *MessageService) CreateMessage(ctx context.Context, content string) (*Message, error) {
+    logger := clog.WithContext(ctx)
+    
+    // 生成消息 ID
+    messageID, err := s.uid.GenerateSnowflake()
+    if err != nil {
+        return nil, fmt.Errorf("生成消息ID失败: %w", err)
+    }
+    
+    message := &Message{
+        ID:        messageID,
+        Content:   content,
+        CreatedAt: time.Now(),
+    }
+    
+    // 保存消息
+    if err := s.messageRepo.CreateMessage(ctx, message); err != nil {
+        return nil, fmt.Errorf("保存消息失败: %w", err)
+    }
+    
+    logger.Info("消息创建成功", clog.Int64("message_id", messageID))
+    return message, nil
+}
+```
+
+### 生成请求 ID
+
+```go
+func RequestIDMiddleware(uidProvider uid.Provider) gin.HandlerFunc {
+    return func(c *gin.Context) {
+        requestID := c.GetHeader("X-Request-ID")
+        
+        if requestID == "" || !uidProvider.IsValidUUID(requestID) {
+            requestID = uidProvider.GetUUIDV7()
+        }
+        
+        c.Header("X-Request-ID", requestID)
+        ctx := clog.WithTraceID(c.Request.Context(), requestID)
+        c.Request = c.Request.WithContext(ctx)
+        
+        c.Next()
+    }
+}
+```
+
+## 4. 分布式限流 (ratelimit)
+
+### API 限流
+
+```go
+func (s *APIService) SendSMS(ctx context.Context, req *SendSMSRequest) error {
+    logger := clog.WithContext(ctx)
+    
+    // 检查用户发送频率
+    allowed, err := s.rateLimit.Allow(ctx, fmt.Sprintf("user:%s:sms", req.UserID), "send_sms")
+    if err != nil {
+        logger.Error("限流检查失败", clog.Err(err))
+        return fmt.Errorf("服务异常，请稍后重试")
+    }
+    
+    if !allowed {
+        return fmt.Errorf("发送过于频繁，请稍后重试")
+    }
+    
+    // 发送短信逻辑
+    if err := s.sendSMSLogic(ctx, req); err != nil {
+        return fmt.Errorf("发送短信失败: %w", err)
+    }
+    
+    logger.Info("短信发送成功", clog.String("user_id", req.UserID))
+    return nil
+}
+```
+
+## 5. 分布式幂等 (once)
+
+### 支付处理幂等
+
+```go
+func (s *PaymentService) ProcessPayment(ctx context.Context, req *PaymentRequest) error {
+    logger := clog.WithContext(ctx)
+    
+    // 使用幂等组件保证支付处理只执行一次
+    err := s.once.Do(ctx, fmt.Sprintf("payment:order:%s", req.OrderID), 24*time.Hour, func() error {
+        logger.Info("开始处理支付", clog.String("order_id", req.OrderID))
+        
+        // 执行支付逻辑
+        if err := s.processPaymentLogic(ctx, req); err != nil {
+            return fmt.Errorf("支付处理失败: %w", err)
+        }
+        
+        logger.Info("支付处理成功", clog.String("order_id", req.OrderID))
+        return nil
+    })
+    
+    if err != nil {
+        return fmt.Errorf("支付处理失败: %w", err)
+    }
+    
+    return nil
+}
+```
+
+### 带结果缓存的幂等操作
+
+```go
+func (s *DocumentService) GenerateReport(ctx context.Context, req *GenerateReportRequest) (*Report, error) {
+    logger := clog.WithContext(ctx)
+    
+    // 使用带结果缓存的幂等操作
+    result, err := s.once.Execute(ctx, fmt.Sprintf("report:%s", req.ReportID), 2*time.Hour, func() (interface{}, error) {
+        logger.Info("开始生成报告", clog.String("report_id", req.ReportID))
+        
+        // 生成报告
+        report, err := s.generateReportLogic(ctx, req)
+        if err != nil {
+            return nil, fmt.Errorf("生成报告失败: %w", err)
+        }
+        
+        logger.Info("报告生成成功", clog.String("report_id", req.ReportID))
+        return report, nil
+    })
+    
+    if err != nil {
+        return nil, fmt.Errorf("生成报告失败: %w", err)
+    }
+    
+    return result.(*Report), nil
+}
+```
+
+## 6. 熔断器 (breaker)
+
+### gRPC 调用保护
+
+```go
+func (s *UserService) GetUserInfoFromRemote(ctx context.Context, userID string) (*UserInfo, error) {
+    logger := clog.WithContext(ctx)
+    
+    // 获取熔断器实例
+    b := s.breaker.GetBreaker("grpc:user-service:GetUserInfo")
+    
+    // 将操作包裹在熔断器中执行
+    var userInfo *UserInfo
+    err := b.Do(ctx, func() error {
+        // 调用远程服务
+        info, err := s.userClient.GetUserInfo(ctx, &pb.GetUserInfoRequest{UserId: userID})
+        if err != nil {
+            return err
+        }
+        userInfo = &UserInfo{
+            ID:       info.Id,
+            Username: info.Username,
+            Email:    info.Email,
+        }
+        return nil
+    })
+    
+    // 处理熔断器错误
+    if errors.Is(err, breaker.ErrBreakerOpen) {
+        logger.Warn("用户服务熔断器打开，执行降级逻辑", clog.String("user_id", userID))
+        return s.getUserInfoFromCache(ctx, userID)
+    }
+    
+    if err != nil {
+        return nil, fmt.Errorf("获取用户信息失败: %w", err)
+    }
+    
+    return userInfo, nil
+}
+```
+
+## 7. 分布式协调 (coord)
+
+### 服务发现
+
+```go
+func (s *UserService) initUserClient() error {
+    // 通过服务发现获取连接
+    conn, err := s.coord.Registry().GetConnection(context.Background(), "user-service")
+    if err != nil {
+        return fmt.Errorf("获取用户服务连接失败: %w", err)
+    }
+    
+    s.userClient = pb.NewUserServiceClient(conn)
+    return nil
+}
+```
+
+### 配置监听
+
+```go
+func (s *ConfigService) watchConfigChanges(ctx context.Context) {
+    // 监听配置变更
+    watcher, err := s.coord.Config().WatchPrefix(ctx, "/config/app/", &s.config)
+    if err != nil {
+        s.logger.Error("创建配置监听器失败", clog.Err(err))
+        return
+    }
+    defer watcher.Close()
+    
+    for event := range watcher.Changes() {
+        s.logger.Info("配置变更", clog.String("key", event.Key))
+        s.handleConfigChange(event.Key, event.Value)
+    }
+}
+```
+
+## 8. 消息队列 (mq)
+
+### 消息生产
+
+```go
+func (s *NotificationService) SendNotification(ctx context.Context, req *NotificationRequest) error {
+    logger := clog.WithContext(ctx)
+    
+    // 构建消息
+    message := &mq.Message{
+        Topic: "notifications.email",
+        Key:   []byte(req.UserID),
+        Value: func() []byte {
+            data, _ := json.Marshal(req)
+            return data
+        }(),
+        Headers: map[string]string{
+            "message_type": "email",
+            "priority":     "normal",
+        },
+    }
+    
+    // 异步发送
+    err := s.mqProducer.Send(ctx, message, func(err error) {
+        if err != nil {
+            logger.Error("发送通知消息失败", clog.Err(err))
+        } else {
+            logger.Info("通知消息发送成功", clog.String("user_id", req.UserID))
+        }
+    })
+    
+    if err != nil {
+        return fmt.Errorf("发送通知失败: %w", err)
+    }
+    
+    return nil
+}
+```
+
+### 消息消费
+
+```go
+func (s *EmailService) StartEmailConsumer(ctx context.Context) error {
+    // 创建消费者
+    consumer, err := mq.NewConsumer(ctx, s.mqConfig, "email-service")
+    if err != nil {
+        return fmt.Errorf("创建消费者失败: %w", err)
+    }
+    
+    // 订阅主题
+    topics := []string{"notifications.email"}
+    err = consumer.Subscribe(ctx, topics, func(ctx context.Context, msg *mq.Message) error {
+        logger := clog.WithContext(ctx)
+        
+        var req NotificationRequest
+        if err := json.Unmarshal(msg.Value, &req); err != nil {
+            logger.Error("解析消息失败", clog.Err(err))
+            return err
+        }
+        
+        // 处理邮件发送
+        if err := s.sendEmail(ctx, &req); err != nil {
+            logger.Error("发送邮件失败", clog.Err(err))
+            return err
+        }
+        
+        logger.Info("邮件发送成功", clog.String("user_id", req.UserID))
+        return nil
+    })
+    
+    if err != nil {
+        return fmt.Errorf("订阅消息失败: %w", err)
+    }
+    
+    return nil
+}
+```
+
+## 9. 搜索引擎 (es)
+
+### 文档索引
+
+```go
+// Message 实现了 es.Indexable 接口
+func (m *Message) GetID() string {
+    return m.ID
+}
+
+func (s *SearchService) IndexMessages(ctx context.Context, messages []*Message) error {
+    logger := clog.WithContext(ctx)
+    
+    // 批量索引消息
+    err := s.esProvider.BulkIndex(ctx, messages)
+    if err != nil {
+        logger.Error("批量索引消息失败", clog.Err(err))
+        return fmt.Errorf("索引消息失败: %w", err)
+    }
+    
+    logger.Info("消息索引成功", clog.Int("count", len(messages)))
+    return nil
+}
+```
+
+### 搜索功能
+
+```go
+func (s *SearchService) SearchMessages(ctx context.Context, req *SearchRequest) (*SearchResult, error) {
+    logger := clog.WithContext(ctx)
+    
+    // 在会话内搜索消息
+    results, err := s.esProvider.SearchInSession[Message](ctx, req.UserID, req.SessionID, req.Keyword, req.Page, req.PageSize)
+    if err != nil {
+        logger.Error("搜索消息失败", clog.Err(err))
+        return nil, fmt.Errorf("搜索消息失败: %w", err)
+    }
+    
+    logger.Info("消息搜索成功", 
+        clog.String("keyword", req.Keyword),
+        clog.Int("total", int(results.Total)))
+    
+    return &SearchResult{
+        Messages: results.Messages,
+        Total:    results.Total,
+    }, nil
+}
+```
+
+## 10. 监控指标 (metrics)
+
+### gRPC 服务器集成
+
+```go
+func (s *Server) StartGRPCServer() error {
+    // 创建 gRPC 服务器
+    s.grpcServer = grpc.NewServer(
+        grpc.ChainUnaryInterceptor(
+            s.metricsProvider.GRPCServerInterceptor(),
+            s.traceInterceptor,
+        ),
+    )
+    
+    // 注册服务
+    pb.RegisterMessageServiceServer(s.grpcServer, s.messageService)
+    
+    // 启动服务器
+    lis, err := net.Listen("tcp", s.config.GRPCPort)
+    if err != nil {
+        return fmt.Errorf("监听失败: %w", err)
+    }
+    
+    go func() {
+        if err := s.grpcServer.Serve(lis); err != nil {
+            s.logger.Error("gRPC 服务器错误", clog.Err(err))
+        }
+    }()
+    
+    return nil
+}
+```
+
+### HTTP 服务器集成
+
+```go
+func (s *Server) StartHTTPServer() error {
+    // 创建 Gin 引擎
+    engine := gin.New()
+    
+    // 使用监控中间件
+    engine.Use(s.metricsProvider.HTTPMiddleware())
+    
+    // 注册路由
+    s.registerRoutes(engine)
+    
+    // 启动服务器
+    go func() {
+        if err := engine.Run(s.config.HTTPPort); err != nil {
+            s.logger.Error("HTTP 服务器错误", clog.Err(err))
+        }
+    }()
+    
+    return nil
+}
+```
+
+## 11. 业务服务集成示例
+
+### 完整的业务服务
+
+```go
+type MessageService struct {
+    dbProvider       db.Provider
+    cacheProvider    cache.Provider
+    mqProducer       mq.Producer
+    uidProvider      uid.Provider
+    rateLimitProvider ratelimit.Provider
+    onceProvider     once.Provider
+    breakerProvider  breaker.Provider
+    esProvider       es.Provider
+    logger           clog.Logger
+}
+
+func NewMessageService(
+    dbProvider db.Provider,
+    cacheProvider cache.Provider,
+    mqProducer mq.Producer,
+    uidProvider uid.Provider,
+    rateLimitProvider ratelimit.Provider,
+    onceProvider once.Provider,
+    breakerProvider breaker.Provider,
+    esProvider es.Provider,
+    logger clog.Logger,
+) *MessageService {
+    return &MessageService{
+        dbProvider:       dbProvider,
+        cacheProvider:    cacheProvider,
+        mqProducer:       mqProducer,
+        uidProvider:      uidProvider,
+        rateLimitProvider: rateLimitProvider,
+        onceProvider:     onceProvider,
+        breakerProvider:  breakerProvider,
+        esProvider:       esProvider,
+        logger:           logger,
+    }
+}
+
+func (s *MessageService) SendMessage(ctx context.Context, req *SendMessageRequest) (*SendMessageResponse, error) {
+    logger := clog.WithContext(ctx)
+    
+    // 1. 限流检查
+    allowed, err := s.rateLimitProvider.Allow(ctx, fmt.Sprintf("user:%s:send_message", req.UserID), "user_send_message")
+    if err != nil {
+        logger.Error("限流检查失败", clog.Err(err))
+        return nil, fmt.Errorf("服务异常，请稍后重试")
+    }
+    
+    if !allowed {
+        return nil, fmt.Errorf("发送过于频繁，请稍后重试")
+    }
+    
+    // 2. 幂等处理
+    var message *Message
+    err = s.onceProvider.Do(ctx, fmt.Sprintf("send_message:%s", req.ID), time.Hour, func() error {
+        // 生成消息ID
+        messageID, err := s.uidProvider.GenerateSnowflake()
+        if err != nil {
+            return fmt.Errorf("生成消息ID失败: %w", err)
+        }
+        
+        // 创建消息
+        message = &Message{
+            ID:        fmt.Sprintf("%d", messageID),
+            UserID:    req.UserID,
+            Content:   req.Content,
+            SessionID: req.SessionID,
+            CreatedAt: time.Now(),
+        }
+        
+        // 保存到数据库
+        if err := s.dbProvider.DB(ctx).Create(message).Error; err != nil {
+            return fmt.Errorf("保存消息失败: %w", err)
+        }
+        
+        // 缓存消息
+        cacheKey := fmt.Sprintf("message:%s", message.ID)
+        messageData, _ := json.Marshal(message)
+        if err := s.cacheProvider.String().Set(ctx, cacheKey, messageData, time.Hour); err != nil {
+            logger.Error("缓存消息失败", clog.Err(err))
+        }
+        
+        // 索引到ES
+        if err := s.esProvider.BulkIndex(ctx, []*Message{message}); err != nil {
+            logger.Error("索引消息失败", clog.Err(err))
+        }
+        
+        // 发送消息到MQ
+        mqMessage := &mq.Message{
+            Topic: "messages.new",
+            Key:   []byte(message.ID),
+            Value: func() []byte {
+                data, _ := json.Marshal(message)
+                return data
+            }(),
+        }
+        
+        if err := s.mqProducer.Send(ctx, mqMessage, func(err error) {
+            if err != nil {
+                logger.Error("发送消息到MQ失败", clog.Err(err))
+            }
+        }); err != nil {
+            logger.Error("发送消息到MQ失败", clog.Err(err))
+        }
+        
+        logger.Info("消息发送成功", clog.String("message_id", message.ID))
+        return nil
+    })
+    
+    if err != nil {
+        return nil, fmt.Errorf("发送消息失败: %w", err)
+    }
+    
+    return &SendMessageResponse{
+        MessageID: message.ID,
+        Success:   true,
+    }, nil
+}
+```
+
+## 最佳实践总结
+
+### 1. 组件初始化顺序
+
+1. **基础组件**: clog, metrics
+2. **核心依赖**: coord
+3. **业务组件**: cache, db, mq, uid
+4. **服务治理**: ratelimit, once, breaker
+5. **扩展组件**: es
+
+### 2. Provider 模式使用
+
+- **统一接口**: 所有组件都实现 Provider 接口
+- **标准构造**: 使用 `New(ctx, config, opts...)` 构造
+- **依赖注入**: 通过 opts 注入依赖组件
+- **资源管理**: 调用 Close() 方法释放资源
+
+### 3. 错误处理策略
+
+- **网络错误**: 组件内置重试机制
+- **配置错误**: 启动时快速失败
+- **业务异常**: 提供明确的错误类型
+- **降级处理**: 提供降级逻辑
+
+### 4. 性能优化建议
+
+- **连接池**: 合理配置连接池大小
+- **缓存策略**: 使用多级缓存
+- **批量操作**: 尽可能使用批量操作
+- **异步处理**: 使用异步消息队列
+
+### 5. 监控和日志
+
+- **结构化日志**: 使用 clog 进行日志记录
+- **链路追踪**: 自动传播 TraceID
+- **性能监控**: 使用 metrics 进行监控
+- **健康检查**: 定期检查组件健康状态
+
+### 6. 配置管理
+
+- **配置分离**: config 用于静态配置，opts 用于动态配置
+- **环境适配**: 使用 GetDefaultConfig 获取环境相关配置
+- **热更新**: 通过 coord 组件实现配置热更新
+- **配置验证**: 启动时验证配置的正确性
+
 ---
 
-## 1. `clog` - 结构化日志
-
-`clog` 提供基于**层次化命名空间**和**上下文感知**的结构化日志解决方案。
-
-- **初始化 (main.go)**:
-  ```go
-  import (
-      "context"
-      "log"
-      "github.com/ceyewan/gochat/im-infra/clog"
-  )
-
-  // 在服务的 main 函数中，初始化全局 Logger。
-  func main() {
-      // 1. 使用默认配置（推荐），或从配置中心加载
-      config := clog.GetDefaultConfig("development") // "development" or "production"
-
-      // 2. 初始化全局 logger，并设置根命名空间（通常是服务名）
-      if err := clog.Init(context.Background(), config, clog.WithNamespace("im-logic")); err != nil {
-          log.Fatalf("初始化 clog 失败: %v", err)
-      }
-
-      clog.Info("服务启动成功")
-      // 输出: {"level":"info", "namespace":"im-logic", "msg":"服务启动成功"}
-  }
-  ```
-
-- **核心用法 (业务逻辑中)**:
-  ```go
-  // 这是一个典型的业务处理函数
-  func (s *UserService) GetUser(ctx context.Context, userID string) {
-      // 1. 从请求上下文中获取带 trace_id 的 logger
-      //    WithContext 是 clog.C 的别名，两者等价
-      logger := clog.WithContext(ctx)
-
-      // 2. (可选) 创建一个特定于当前操作的子命名空间 logger
-      //    这会自动继承根命名空间 "im-logic" 和 trace_id
-      opLogger := logger.Namespace("get_user")
-      
-      opLogger.Info("开始获取用户信息", clog.String("user_id", userID))
-      
-      // ... 业务逻辑 ...
-      
-      if err != nil {
-          opLogger.Error("获取用户信息失败", clog.Err(err))
-          return
-      }
-      
-      opLogger.Info("成功获取用户信息")
-  }
-
-  // --- 在中间件或拦截器中 ---
-  // func TraceMiddleware(c *gin.Context) {
-  //     // ...
-  //     // 使用 WithTraceID 将 traceID 注入 context
-  //     ctx := clog.WithTraceID(c.Request.Context(), traceID)
-  //     c.Request = c.Request.WithContext(ctx)
-  //     c.Next()
-  // }
-  ```
-
----
-
-## 2. `coord` - 分布式协调
-
-`coord` 提供服务发现、配置管理和分布式锁等功能。
-
-- **初始化 (main.go)**:
-  ```go
-  import "github.com/ceyewan/gochat/im-infra/coord"
-
-  // 在服务的 main 函数中，初始化 coord Provider。
-  func main() {
-      // ... 首先初始化 clog ...
-      clog.Init(...)
-
-      // 1. 使用默认配置（推荐），或从配置中心加载
-      config := coord.GetDefaultConfig("development") // "development" or "production"
-      
-      // 2. 根据环境覆盖必要的配置
-      config.Endpoints = []string{"localhost:2379"} // 开发环境单节点
-      // config.Endpoints = []string{"etcd1:2379", "etcd2:2379", "etcd3:2379"} // 生产环境集群
-      
-      // 3. 创建 coord Provider 实例
-      coordProvider, err := coord.New(
-          context.Background(),
-          config,
-          coord.WithLogger(clog.Namespace("coord")),
-      )
-      if err != nil {
-          log.Fatalf("初始化 coord 失败: %v", err)
-      }
-      defer coordProvider.Close()
-      
-      // 后续可以将 coordProvider 注入到其他需要的组件中
-      // ...
-  }
-  ```
-
-- **核心用法**:
-  ```go
-  // 1. 服务发现: 获取 gRPC 连接
-  conn, err := coordProvider.Registry().GetConnection(ctx, "user-service")
-  if err != nil {
-      return fmt.Errorf("获取服务连接失败: %w", err)
-  }
-  userClient := userpb.NewUserServiceClient(conn)
-
-  // 2. 配置管理: 获取配置
-  var dbConfig myapp.DatabaseConfig
-  err = coordProvider.Config().Get(ctx, "/config/dev/global/db", &dbConfig)
-  if err != nil {
-      return fmt.Errorf("获取配置失败: %w", err)
-  }
-
-  // 2.1. 前缀监听: 动态配置热更新
-  // 示例：监听所有限流规则变更，实现无需重启的热更新
-  var watchValue interface{}
-  watcher, err := coordProvider.Config().WatchPrefix(ctx, "/config/ratelimit/rules/", &watchValue)
-  if err != nil {
-      return fmt.Errorf("创建前缀监听器失败: %w", err)
-  }
-  defer watcher.Close()
-
-  go func() {
-      for event := range watcher.Chan() {
-          log.Printf("检测到限流规则变更: type=%s, key=%s", event.Type, event.Key)
-          // 重新加载规则逻辑...
-      }
-  }()
-
-  // 3. 分布式锁
-  lock, err := coordProvider.Lock().Acquire(ctx, "my-resource-key", 30*time.Second)
-  if err != nil {
-      return fmt.Errorf("获取锁失败: %w", err)
-  }
-  defer lock.Unlock(ctx)
-  // ... 执行关键部分 ...
-  ```
-
----
-
-## 3. `mq` - 消息队列
-
-`mq` 提供了生产和消费消息的统一接口。
-
-- **初始化 (main.go)**:
-  ```go
-  import "github.com/ceyewan/gochat/im-infra/mq"
-
-  // 在服务的 main 函数中，初始化 mq Producer 和 Consumer。
-  func main() {
-      // ... 首先初始化 clog 和 coord ...
-      clog.Init(...)
-      coordProvider, _ := coord.New(...)
-
-      // 1. 使用默认配置（推荐），或从配置中心加载
-      config := mq.GetDefaultConfig("development") // "development" or "production"
-      
-      // 2. 根据环境覆盖必要的配置
-      config.Brokers = []string{"localhost:9092"} // 开发环境单节点
-      // config.Brokers = []string{"kafka1:9092", "kafka2:9092", "kafka3:9092"} // 生产环境集群
-      
-      // 3. 创建 Producer 实例
-      producer, err := mq.NewProducer(
-          context.Background(),
-          config,
-          mq.WithLogger(clog.Namespace("mq-producer")),
-          mq.WithCoordProvider(coordProvider),
-      )
-      if err != nil {
-          log.Fatalf("初始化 mq producer 失败: %v", err)
-      }
-      defer producer.Close()
-      
-      // 4. 创建 Consumer 实例
-      consumer, err := mq.NewConsumer(
-          context.Background(),
-          config,
-          "notification-service-user-events-group", // 遵循命名规范的 GroupID
-          mq.WithLogger(clog.Namespace("mq-consumer")),
-          mq.WithCoordProvider(coordProvider),
-      )
-      if err != nil {
-          log.Fatalf("初始化 mq consumer 失败: %v", err)
-      }
-      defer consumer.Close()
-      
-      // 后续可以将 producer 和 consumer 注入到业务服务中
-      // ...
-  }
-  ```
-
-- **核心用法**:
-  ```go
-  // 生产消息
-  msg := &mq.Message{
-      Topic: "user.events.registered",
-      Key:   []byte("user123"),
-      Value: []byte(`{"id":"user123","name":"John"}`),
-  }
-  
-  // 异步发送（推荐）
-  producer.Send(ctx, msg, func(err error) {
-      if err != nil {
-          clog.WithContext(ctx).Error("发送消息失败", clog.Err(err))
-      }
-  })
-  
-  // 同步发送（需要强一致性时）
-  if err := producer.SendSync(ctx, msg); err != nil {
-      return fmt.Errorf("发送消息失败: %w", err)
-  }
-
-  // 消费消息
-  handler := func(ctx context.Context, msg *mq.Message) error {
-      logger := clog.WithContext(ctx)
-      logger.Info("收到消息", clog.String("topic", msg.Topic))
-      
-      // 处理消息逻辑
-      return nil
-  }
-  
-  topics := []string{"user.events.registered"}
-  err := consumer.Subscribe(ctx, topics, handler)
-  if err != nil {
-      return fmt.Errorf("订阅消息失败: %w", err)
-  }
-  ```
-
----
-
-## 4. `db` - 数据库
-
-`db` 组件提供基于 GORM 的、支持分库分表的高性能数据库操作层。
-
-- **初始化 (main.go)**:
-  ```go
-  import (
-      "context"
-      "encoding/json"
-      "log"
-      "time"
-
-      "github.com/ceyewan/gochat/im-infra/clog"
-      "github.com/ceyewan/gochat/im-infra/db"
-  )
-
-  // 在服务的 main 函数中，初始化 db Provider。
-  func main() {
-      // ... 首先初始化 clog ...
-      clog.Init(...)
-
-      // 1. 使用默认配置（推荐），或从配置中心加载
-      config := db.GetDefaultConfig("development") // "development" or "production"
-      
-      // 2. 根据环境覆盖必要的配置
-      config.DSN = "user:password@tcp(127.0.0.1:3306)/gochat?charset=utf8mb4&parseTime=True&loc=Local"
-      
-      // 3. (可选) 配置分片
-      config.Sharding = &db.ShardingConfig{
-          ShardingKey:    "user_id",
-          NumberOfShards: 16,
-          Tables: map[string]*db.TableShardingConfig{
-              "messages": {},
-          },
-      }
-
-      // 4. 创建 db Provider 实例
-      // 最佳实践：使用 WithLogger 将 GORM 日志接入 clog
-      dbProvider, err := db.New(
-          context.Background(),
-          config,
-          db.WithLogger(clog.Namespace("gorm")),
-      )
-      if err != nil {
-          log.Fatalf("初始化 db 失败: %v", err)
-      }
-      
-      // 后续可以将 dbProvider 注入到业务 Repo 中
-      // ...
-  }
-  ```
-
-- **核心用法 (在 Repository 或 Service 中)**:
-  ```go
-  // 假设 dbProvider 已经通过依赖注入传入
-  
-  // 1. 基本查询/写入
-  // 通过 db.DB(ctx) 获取带上下文的 gorm.DB 实例
-  var user User
-  err := dbProvider.DB(ctx).Where("id = ?", 1).First(&user).Error
-  if err != nil {
-      return fmt.Errorf("查询用户失败: %w", err)
-  }
-  
-  newUser := &User{Name: "test"}
-  err = dbProvider.DB(ctx).Create(newUser).Error
-  if err != nil {
-      return fmt.Errorf("创建用户失败: %w", err)
-  }
-
-  // 2. 涉及分片键的查询
-  // 查询时必须带上分片键 `user_id`，以便 GORM 能定位到正确的表
-  var messages []*Message
-  err = dbProvider.DB(ctx).Where("user_id = ?", currentUserID).Find(&messages).Error
-  if err != nil {
-      return fmt.Errorf("查询消息失败: %w", err)
-  }
-
-  // 3. 事务
-  // Transaction 方法会自动处理上下文和提交/回滚
-  err = dbProvider.Transaction(ctx, func(tx *gorm.DB) error {
-      // tx 实例已包含事务和上下文，可直接使用
-      if err := tx.Model(&Account{}).Where("user_id = ?", fromUserID).Update("balance", gorm.Expr("balance - ?", amount)).Error; err != nil {
-          return err
-      }
-      if err := tx.Model(&Account{}).Where("user_id = ?", toUserID).Update("balance", gorm.Expr("balance + ?", amount)).Error; err != nil {
-          return err
-      }
-      return nil
-  })
-  ```
-
----
-
-## 5. `cache` - 缓存
-
-`cache` 提供统一的分布式缓存接口。
-
-- **初始化 (main.go)**:
-  ```go
-  import "github.com/ceyewan/gochat/im-infra/cache"
-
-  // 在服务的 main 函数中，初始化 cache Provider。
-  func main() {
-      // ... 首先初始化 clog 和 coord ...
-      
-      // 使用默认配置（推荐）
-      config := cache.GetDefaultConfig("production") // 或 "development"
-      
-      // 根据实际部署环境覆盖特定配置
-      config.Addr = "redis-cluster:6379"
-      config.Password = "your-redis-password"
-      config.KeyPrefix = "gochat:"
-      
-      // 创建 cache Provider
-      cacheProvider, err := cache.New(context.Background(), config, 
-          cache.WithLogger(clog.Namespace("cache")),
-          cache.WithCoordProvider(coordProvider),
-      )
-      if err != nil {
-          clog.Fatal("初始化 cache 失败", clog.Err(err))
-      }
-      defer cacheProvider.Close()
-      
-      clog.Info("cache Provider 初始化成功")
-  }
-  ```
-
-- **核心用法**:
-  ```go
-  // 设置缓存
-  err := cacheProvider.String().Set(ctx, "user:123", "John", 10*time.Minute)
-  if err != nil {
-      return fmt.Errorf("设置缓存失败: %w", err)
-  }
-
-  // 获取缓存
-  val, err := cacheProvider.String().Get(ctx, "user:123")
-  if err != nil {
-      if errors.Is(err, cache.ErrCacheMiss) {
-          // 缓存未命中
-          clog.WithContext(ctx).Info("缓存未命中", clog.String("key", "user:123"))
-          return nil, nil
-      }
-      return fmt.Errorf("获取缓存失败: %w", err)
-  }
-
-  // 使用分布式锁
-  lock, err := cacheProvider.Lock().Acquire(ctx, "critical-section", 30*time.Second)
-  if err != nil {
-      return fmt.Errorf("获取锁失败: %w", err)
-  }
-  defer lock.Unlock(ctx)
-  
-  // ... 执行关键代码 ...
-
-  // 使用布隆过滤器检测重复
-  exists, err := cacheProvider.Bloom().BFExists(ctx, "seen-items", "item123")
-  if err != nil {
-      return fmt.Errorf("检查布隆过滤器失败: %w", err)
-  }
-  if !exists {
-      // 首次出现，添加到过滤器
-      cacheProvider.Bloom().BFAdd(ctx, "seen-items", "item123")
-  }
-  ```
-
----
-
-## 6. `uid` - 分布式 ID
-
-`uid` 用于生成全局唯一的 ID，支持 Snowflake 和 UUID v7 两种方案。
-
-- **初始化 (main.go)**:
-  ```go
-  import "github.com/ceyewan/gochat/im-infra/uid"
-
-  // 在服务的 main 函数中，初始化 uid Provider。
-  func main() {
-      // ... 首先初始化 clog 和 coord ...
-      
-      // 使用默认配置（推荐）
-      config := uid.GetDefaultConfig("production") // 或 "development"
-      
-      // 根据实际服务覆盖配置
-      config.ServiceName = "message-service"
-      
-      // 创建 uid Provider
-      uidProvider, err := uid.New(context.Background(), config,
-          uid.WithLogger(clog.Namespace("uid")),
-          uid.WithCoordProvider(coordProvider), // 对于 Snowflake 是必需的依赖
-      )
-      if err != nil {
-          clog.Fatal("初始化 uid 失败", clog.Err(err))
-      }
-      defer uidProvider.Close()
-      
-      clog.Info("uid Provider 初始化成功")
-  }
-  ```
-
-- **核心用法**:
-  ```go
-  // 生成 UUID v7（无状态，用于请求ID、资源ID等）
-  requestID := uidProvider.GetUUIDV7()
-  logger.Info("生成请求ID", clog.String("request_id", requestID))
-
-  // 生成 Snowflake ID（有状态，用于数据库主键、消息ID等）
-  messageID, err := uidProvider.GenerateSnowflake()
-  if err != nil {
-      return fmt.Errorf("生成消息ID失败: %w", err)
-  }
-  logger.Info("生成消息ID", clog.Int64("message_id", messageID))
-
-  // 解析 Snowflake ID
-  timestamp, instanceID, sequence := uidProvider.ParseSnowflake(messageID)
-  logger.Info("解析ID",
-      clog.Int64("timestamp", timestamp),
-      clog.Int64("instance_id", instanceID),
-      clog.Int64("sequence", sequence))
-  ```
-
----
-
-## 7. `ratelimit` - 分布式限流
-
-`ratelimit` 用于控制对资源的访问速率，支持分布式和单机两种模式。
-
-- **初始化 (main.go)**:
-  ```go
-  import "github.com/ceyewan/gochat/im-infra/ratelimit"
-
-  // 在服务的 main 函数中，初始化 ratelimit Provider。
-  func main() {
-      // ... 首先初始化 clog、coord 和 cache ...
-      
-      // 1. 获取并覆盖配置
-      config := ratelimit.GetDefaultConfig("production")
-      config.ServiceName = "message-service"
-      config.RulesPath = "/config/prod/message-service/ratelimit/"
-      
-      // 2. 创建 Provider
-      // New 函数内部会根据 config.Mode 决定是否使用 cacheProvider
-      rateLimitProvider, err := ratelimit.New(context.Background(), config,
-          ratelimit.WithLogger(clog.Namespace("ratelimit")),
-          ratelimit.WithCoordProvider(coordProvider),
-          ratelimit.WithCacheProvider(cacheProvider), // 分布式模式依赖 cache 组件
-      )
-      if err != nil {
-          clog.Fatal("初始化 ratelimit 失败", clog.Err(err))
-      }
-      defer rateLimitProvider.Close()
-      
-      clog.Info("ratelimit Provider 初始化成功", clog.String("mode", config.Mode))
-  }
-  ```
-
-- **核心用法**:
-  ```go
-  // 检查单个请求是否被允许
-  allowed, err := rateLimitProvider.Allow(ctx, "user:123", "send_message")
-  if err != nil {
-      // 降级策略：限流器异常时的处理
-      clog.WithContext(ctx).Error("限流检查失败", clog.Err(err))
-      // 根据业务需求决定是放行还是拒绝
-      return
-  }
-  if !allowed {
-      // 请求被限流，直接返回错误或特定状态码
-      return fmt.Errorf("请求过于频繁，请稍后再试")
-  }
-
-  // ... 执行核心业务逻辑 ...
-  ```
-
----
-## 8. `once` - 分布式幂等
-
-`once` 用于保证操作的幂等性，支持分布式和单机两种模式。
-
-- **初始化 (main.go)**:
-  ```go
-  import "github.com/ceyewan/gochat/im-infra/once"
-
-  // 在服务的 main 函数中，初始化 once Provider。
-  func main() {
-      // ... 首先初始化 clog 和 cache ...
-      
-      // 1. 获取并覆盖配置
-      config := once.GetDefaultConfig("production") // 或 "development"
-      config.ServiceName = "message-service"
-      config.KeyPrefix = "idempotent:"
-      
-      // 2. 创建 Provider
-      onceProvider, err := once.New(context.Background(), config,
-          once.WithLogger(clog.Namespace("once")),
-          once.WithCacheProvider(cacheProvider), // 分布式模式依赖 cache 组件
-      )
-      if err != nil {
-          clog.Fatal("初始化 once 失败", clog.Err(err))
-      }
-      defer onceProvider.Close()
-      
-      clog.Info("once Provider 初始化成功", clog.String("mode", config.Mode))
-  }
-  ```
-
-- **核心用法**:
-  ```go
-  // 无返回值的幂等操作（最常用）
-  err := onceProvider.Do(ctx, "payment:process:order-123", 24*time.Hour, func() error {
-      // 核心业务逻辑，只会执行一次
-      return processPayment(ctx, orderData)
-  })
-  if err != nil {
-      return fmt.Errorf("处理支付失败: %w", err)
-  }
-
-  // 有返回值的幂等操作（带结果缓存）
-  result, err := onceProvider.Execute(ctx, "doc:create:xyz", 48*time.Hour, func() (any, error) {
-      // 创建文档并返回结果，结果会被缓存
-      return createDocument(ctx, docData)
-  })
-  if err != nil {
-      return fmt.Errorf("创建文档失败: %w", err)
-  }
-  doc := result.(*Document)
-
-  // 清除幂等状态（用于数据订正或手动重试）
-  err = onceProvider.Clear(ctx, "payment:process:order-123")
-  if err != nil {
-      return fmt.Errorf("清除幂等状态失败: %w", err)
-  }
-  ```
-
----
-
-## 9. `breaker` - 熔断器
-
-`breaker` 用于保护服务，防止因依赖故障引起的雪崩效应。
-
-- **初始化 (main.go)**:
-  ```go
-  import "github.com/ceyewan/gochat/im-infra/breaker"
-
-  // 在服务的 main 函数中，初始化 breaker Provider。
-  func main() {
-      // ... 首先初始化 clog 和 coord ...
-      
-      // 1. 获取并覆盖配置
-      // 推荐使用 GetDefaultConfig 获取标准配置，然后按需覆盖
-      config := breaker.GetDefaultConfig("message-service", "production")
-      // config.PoliciesPath = "/custom/path/if/needed" // 按需覆盖
-      
-      // 2. 创建 Provider，并通过 With... Options 注入依赖
-      breakerProvider, err := breaker.New(context.Background(), config,
-          breaker.WithLogger(clog.Namespace("breaker")),
-          breaker.WithCoordProvider(coordProvider), // 依赖 coord 组件
-      )
-      if err != nil {
-          clog.Fatal("初始化 breaker 失败", clog.Err(err))
-      }
-      defer breakerProvider.Close()
-      
-      clog.Info("breaker Provider 初始化成功")
-  }
-  ```
-
-- **核心用法**:
-  ```go
-  // 获取熔断器实例
-  b := breakerProvider.GetBreaker("grpc:user-service:GetUserInfo")
-  
-  // 将操作包裹在熔断器中执行
-  err := b.Do(ctx, func() error {
-      // 核心业务逻辑，如gRPC调用、HTTP请求等
-      return callDownstreamService(ctx)
-  })
-  
-  // 处理熔断器错误
-  if errors.Is(err, breaker.ErrBreakerOpen) {
-      // 熔断器处于打开状态，请求被拒绝，可以返回特定错误或执行降级逻辑
-      return fmt.Errorf("服务暂时不可用，请稍后重试")
-  }
-  if err != nil {
-      // 其他业务错误
-      return fmt.Errorf("调用失败: %w", err)
-  }
-  ```
-
----
-
-## 10. `metrics` - 可观测性
-
-`metrics` 组件基于 OpenTelemetry，为所有服务提供开箱即用的指标 (Metrics) 和链路追踪 (Tracing) 能力。其核心是**自动化**和**零侵入**。
-
-- **初始化 (main.go)**:
-  ```go
-  import "github.com/ceyewan/gochat/im-infra/metrics"
-
-  // 在服务的 main 函数中，初始化 metrics Provider。
-  func main() {
-      // ... 首先初始化 clog ...
-      
-      // 1. 获取并覆盖配置
-      // 推荐使用 GetDefaultConfig 获取标准配置
-      config := metrics.GetDefaultConfig("message-service", "production")
-      // config.ExporterEndpoint = "http://my-jaeger:14268/api/traces" // 按需覆盖
-      
-      // 2. 创建 Provider
-      metricsProvider, err := metrics.New(context.Background(), config,
-          metrics.WithLogger(clog.Namespace("metrics")),
-      )
-      if err != nil {
-          clog.Fatal("初始化 metrics 失败", clog.Err(err))
-      }
-      defer metricsProvider.Shutdown(context.Background())
-      
-      clog.Info("metrics Provider 初始化成功")
-  }
-  ```
-
-- **核心用法 (集成)**:
-
-  `metrics` 的主要用法是在创建 gRPC 服务器或客户端时，链入由 `Provider` 提供的拦截器。
-
-  ```go
-  // 在创建 gRPC Server 时集成
-  server := grpc.NewServer(
-      grpc.ChainUnaryInterceptor(
-          metricsProvider.GRPCServerInterceptor(),
-          // ... 其他拦截器，如 a, b, c ...
-      ),
-  )
-
-  // 在创建 gRPC Client 时集成
-  conn, err := grpc.Dial(
-      "target-service",
-      grpc.WithUnaryInterceptor(metricsProvider.GRPCClientInterceptor()),
-  )
-  
-  // 对于 Gin HTTP 服务
-  // engine.Use(metricsProvider.HTTPMiddleware())
-  ```
- 
- ---
- 
- ## 11. `es` - 分布式泛型索引
- 
- `es` 组件提供了与 Elasticsearch 交互的统一接口，用于索引和搜索任何实现了 `es.Indexable` 接口的数据。
- 
- - **初始化 (main.go)**:
-   ```go
-   import "github.com/ceyewan/gochat/im-infra/es"
- 
-   // 在服务的 main 函数中，初始化 es Provider。
-   func main() {
-       // ... 首先初始化 clog ...
-       
-       // 1. 获取并覆盖配置
-       config := es.GetDefaultConfig("production")
-       config.Addresses = []string{"http://elasticsearch:9200"}
-       
-       // 2. 创建 Provider
-       esProvider, err := es.New(context.Background(), config,
-           es.WithLogger(clog.Namespace("es")),
-       )
-       if err != nil {
-           clog.Fatal("初始化 es 失败", clog.Err(err))
-       }
-       defer esProvider.Close()
-       
-       clog.Info("es Provider 初始化成功")
-   }
-   ```
- 
- - **核心用法**:
-   ```go
-   // 1. 在业务代码中定义你的模型
-   type MyMessage struct {
-       MessageID string `json:"message_id"`
-       SessionID string `json:"session_id"`
-       Content   string `json:"content"`
-   }
- 
-   // 2. 实现 es.Indexable 接口
-   func (m MyMessage) GetID() string {
-       return m.MessageID
-   }
- 
-   // 3. 批量索引 (泛型调用)
-   messages := []MyMessage{
-       { MessageID: "1", SessionID: "s1", Content: "你好" },
-       { MessageID: "2", SessionID: "s1", Content: "世界" },
-   }
-   err := esProvider.BulkIndex(ctx, messages)
-   if err != nil {
-       // 处理错误
-   }
- 
-   // 4. 在会话内搜索 (泛型调用)
-   results, err := esProvider.SearchInSession[MyMessage](ctx, "user1", "s1", "你好", 1, 10)
-   if err != nil {
-       // 处理错误
-   }
-   log.Printf("找到 %d 条消息", results.Total)
-   for _, msg := range results.Messages {
-       // msg 是 *MyMessage 类型
-       log.Printf("消息内容: %s", msg.Content)
-   }
-   ```
+遵循这些最佳实践可以确保系统的稳定性、可维护性和高性能。所有组件都遵循统一的 Provider 模式，提供一致的使用体验和强大的功能支持。

@@ -1,319 +1,538 @@
-# 基础设施: Once 分布式幂等操作
+# Once 组件
 
-## 1. 设计理念
+Once 组件提供了统一的分布式幂等操作接口，确保关键操作在分布式环境中的幂等性和结果一致性。
 
-`once` 组件提供了一个**统一的分布式幂等接口**，封装了两种不同场景的幂等实现：
+## 1. 概述
 
-- **分布式幂等**: 基于 Redis 的分布式幂等，适用于多实例部署的微服务环境，确保集群级别的操作幂等性。
-- **单机幂等**: 基于内存的单机幂等，适用于单实例部署或不需要跨实例协调的场景，性能更高。
+Once 组件实现了基于 Provider 模式的统一幂等操作接口，支持单机和分布式两种运行模式：
 
-`once` 组件遵循 `im-infra` 的核心规范：
+- **单机模式**：基于内存的幂等控制，适用于单实例部署
+- **分布式模式**：基于 Redis 的分布式幂等，适用于多实例部署的微服务环境
 
-- **统一接口**: 通过 Provider 模式提供一致的幂等体验，业务代码无需关心底层实现
-- **结果缓存**: 对于需要返回结果的操作，提供原子性的"防重+结果缓存"功能
-- **失败可重试**: 操作失败时自动清除幂等标记，允许后续重试
-- **智能模式选择**: 根据配置自动选择最适合的幂等实现
+## 2. 核心接口
 
-## 2. 核心 API 契约
-
-### 2.1 构造函数
+### 2.1 Provider 接口
 
 ```go
-// Config 是 once 组件的配置结构体。
+// Provider 定义了幂等操作的核心接口
+type Provider interface {
+    // Do 执行一个幂等操作，无返回值
+    // 如果key对应的操作已经成功执行过，则直接返回nil
+    // 否则，执行函数f。如果f返回错误，幂等标记不会被持久化，允许重试
+    Do(ctx context.Context, key string, ttl time.Duration, f func() error) error
+    
+    // Execute 执行一个带返回值的幂等操作
+    // 如果操作已执行过，它会直接返回缓存的结果
+    // 否则，执行callback，缓存其结果，并返回
+    Execute(ctx context.Context, key string, ttl time.Duration, callback func() (any, error)) (any, error)
+    
+    // Clear 主动清除指定key的幂等标记和缓存结果
+    Clear(ctx context.Context, key string) error
+    
+    // Close 关闭Provider并释放相关资源
+    Close() error
+}
+```
+
+### 2.2 构造函数和配置
+
+```go
+// Config 幂等组件配置
 type Config struct {
-	// Mode 幂等模式，支持 "distributed" 和 "local" 两种模式
-	Mode string `json:"mode"`
-	
-	// ServiceName 用于日志记录和监控，以区分是哪个服务在使用幂等器
-	ServiceName string `json:"serviceName"`
-	
-	// KeyPrefix 为所有幂等 key 自动添加前缀，用于命名空间隔离
-	KeyPrefix string `json:"keyPrefix"`
-	
+    // Mode 幂等模式：local 或 distributed
+    Mode string `json:"mode"`
+    
+    // ServiceName 服务名称，用于日志和监控
+    ServiceName string `json:"serviceName"`
+    
+    // KeyPrefix 为所有幂等key添加前缀，用于命名空间隔离
+    KeyPrefix string `json:"keyPrefix"`
+    
+    // DefaultTTL 默认过期时间
+    DefaultTTL time.Duration `json:"defaultTTL"`
+    
+    // LocalConfig 单机幂等配置
+    LocalConfig LocalConfig `json:"localConfig"`
+    
+    // DistributedConfig 分布式幂等配置
+    DistributedConfig DistributedConfig `json:"distributedConfig"`
 }
 
-// GetDefaultConfig 返回默认的 once 配置。
-// 开发环境：使用单机模式，无 Redis 依赖。
-// 生产环境：使用分布式模式，依赖 cache.Provider。
+// LocalConfig 单机幂等配置
+type LocalConfig struct {
+    // CleanupInterval 清理间隔
+    CleanupInterval time.Duration `json:"cleanupInterval"`
+    
+    // MaxEntries 最大缓存条目数
+    MaxEntries int `json:"maxEntries"`
+}
+
+// DistributedConfig 分布式幂等配置
+type DistributedConfig struct {
+    // RedisKeyPrefix Redis键前缀
+    RedisKeyPrefix string `json:"redisKeyPrefix"`
+    
+    // ResultKeyPrefix 结果缓存键前缀
+    ResultKeyPrefix string `json:"resultKeyPrefix"`
+    
+    // LockTimeout 锁超时时间
+    LockTimeout time.Duration `json:"lockTimeout"`
+    
+    // ScriptLua Lua脚本内容
+    ScriptLua string `json:"scriptLua"`
+}
+
+// GetDefaultConfig 返回默认配置
 func GetDefaultConfig(env string) *Config
 
-// Option 定义了用于定制 once Provider 的函数。
+// Option 定义了用于定制幂等Provider的函数
 type Option func(*options)
 
-// WithLogger 将一个 clog.Logger 实例注入 once，用于记录内部日志。
+// WithLogger 注入日志组件
 func WithLogger(logger clog.Logger) Option
 
-// WithCacheProvider 注入 cache.Provider，用于分布式模式的 Redis 操作。
-// 如果 config.Mode 为 "distributed"，此选项是必需的。
+// WithCacheProvider 注入缓存组件（分布式模式必需）
 func WithCacheProvider(provider cache.Provider) Option
 
-// New 创建一个新的 once Provider 实例。
-// 这是与 once 组件交互的唯一入口。
+// WithMetricsProvider 注入监控组件
+func WithMetricsProvider(provider metrics.Provider) Option
+
+// WithCoordProvider 注入配置中心组件
+func WithCoordProvider(provider coord.Provider) Option
+
+// New 创建幂等Provider实例
 func New(ctx context.Context, config *Config, opts ...Option) (Provider, error)
 ```
 
-### 2.2 Provider 接口
+## 3. 实现细节
+
+### 3.1 架构设计
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Once Provider                           │
+├─────────────────────────────────────────────────────────────┤
+│                    Core Interface                           │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
+│  │     Do      │  │  Execute    │  │   Clear     │          │
+│  └─────────────┘  └─────────────┘  └─────────────┘          │
+├─────────────────────────────────────────────────────────────┤
+│                    Implementation                            │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
+│  │    Local    │  │ Distributed│  │   Manager   │          │
+│  │   Executor  │  │   Executor  │  │   Manager   │          │
+│  └─────────────┘  └─────────────┘  └─────────────┘          │
+├─────────────────────────────────────────────────────────────┤
+│                  Dependencies                                │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
+│  │   clog      │  │   cache     │  │   metrics   │          │
+│  └─────────────┘  └─────────────┘  └─────────────┘          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3.2 核心组件
+
+**OnceProvider**
+- 实现Provider接口
+- 管理幂等操作和状态
+- 提供统一的幂等接口
+
+**LocalExecutor**
+- 基于内存实现单机幂等
+- 高性能幂等控制
+- 支持自动清理过期状态
+
+**DistributedExecutor**
+- 基于Redis实现分布式幂等
+- 支持集群级别幂等
+- 使用Lua脚本保证原子性
+
+**StateManager**
+- 管理幂等状态
+- 处理TTL过期
+- 支持状态清理和恢复
+
+### 3.3 幂等算法
+
+**状态机设计**:
+- 初始状态：未执行
+- 执行中状态：正在执行
+- 成功状态：执行成功
+- 失败状态：执行失败
+
+**分布式实现**:
+- 基于Redis原子操作
+- 使用Lua脚本保证一致性
+- 支持结果缓存和状态管理
+
+### 3.4 错误处理和恢复
+
+**业务逻辑失败**:
+- 如果回调函数返回错误，幂等标记不会被持久化
+- 允许后续重试操作
+- 支持重试次数限制
+
+**幂等器异常**:
+- 记录异常日志
+- 支持降级策略
+- 提供监控和告警
+
+## 4. 高级功能
+
+### 4.1 结果缓存
 
 ```go
-// Provider 定义了 once 组件提供的所有能力。
-type Provider interface {
-	// Do 执行一个幂等操作，无返回值。
-	// 如果 key 对应的操作已经成功执行过，则直接返回 nil。
-	// 否则，执行函数 f。如果 f 返回错误，幂等标记不会被持久化，允许重试。
-	Do(ctx context.Context, key string, ttl time.Duration, f func() error) error
+// 使用Execute缓存操作结果
+result, err := onceProvider.Execute(ctx, "calc:complex", time.Hour, func() (any, error) {
+    // 执行复杂计算
+    return complexCalculation()
+})
+```
 
-	// Execute 执行一个带返回值的幂等操作。
-	// 如果操作已执行过，它会直接返回缓存的结果。
-	// 否则，执行 callback，缓存其结果，并返回。
-	Execute(ctx context.Context, key string, ttl time.Duration, callback func() (any, error)) (any, error)
+### 4.2 状态管理
 
-	// Clear 主动清除指定 key 的幂等标记和缓存结果。
-	// 适用于需要手动重置幂等状态的场景。
-	Clear(ctx context.Context, key string) error
+```go
+// 手动清除幂等状态
+err := onceProvider.Clear(ctx, "payment:order:123")
 
-	// Close 关闭 Provider 并释放相关资源。
-	Close() error
+// 批量清除状态
+err := onceProvider.ClearByPrefix(ctx, "payment:order:")
+```
+
+### 4.3 监控和指标
+
+```go
+// 监控指标
+metrics := map[string]string{
+    "operations_total":     "总操作数",
+    "cache_hits_total":    "缓存命中数",
+    "cache_misses_total":  "缓存未命中数",
+    "errors_total":        "错误总数",
+    "executions_total":    "执行总数",
 }
 ```
 
-## 3. 标准用法
+## 5. 使用示例
 
-### 场景 1: 在服务启动时初始化 once Provider
+### 5.1 基本使用
 
 ```go
-// 在 main.go 中
-func main() {
-    // ... 首先初始化 clog 和 cache ...
+package main
+
+import (
+    "context"
+    "fmt"
+    "time"
     
-    // 1. 获取并覆盖配置
-    config := once.GetDefaultConfig("production") // 或 "development"
-    config.ServiceName = "message-service"
+    "github.com/gochat-kit/once"
+    "github.com/gochat-kit/clog"
+    "github.com/gochat-kit/cache"
+)
+
+func main() {
+    ctx := context.Background()
+    
+    // 初始化依赖组件
+    logger := clog.New(ctx, &clog.Config{})
+    cacheProvider := cache.New(ctx, &cache.Config{})
+    
+    // 获取默认配置
+    config := once.GetDefaultConfig("production")
+    config.ServiceName = "payment-service"
     config.KeyPrefix = "idempotent:"
     
-    // 2. 准备 Options
-    // New 函数内部会根据 config.Mode 决定是否使用 cacheProvider
+    // 创建幂等Provider
     opts := []once.Option{
-        once.WithLogger(clog.Namespace("once")),
-        once.WithCacheProvider(cacheProvider), // 分布式模式依赖 cache 组件
+        once.WithLogger(logger),
+        once.WithCacheProvider(cacheProvider),
     }
-
-    // 3. 创建 Provider
-    // 初始化逻辑被封装在 New 函数中，调用者无需关心具体模式
-    onceProvider, err := once.New(context.Background(), config, opts...)
+    
+    onceProvider, err := once.New(ctx, config, opts...)
     if err != nil {
-        clog.Fatal("初始化 once 失败", clog.Err(err))
+        logger.Fatal("创建幂等器失败", clog.Err(err))
     }
     defer onceProvider.Close()
     
-    clog.Info("once Provider 初始化成功", clog.String("mode", config.Mode))
-}
-```
-
-### 场景 2: 保证消息队列消费者幂等性 (使用 `Do`)
-
-```go
-import "github.com/ceyewan/gochat/im-infra/once"
-
-// 在服务的构造函数中注入 onceProvider
-type PaymentService struct {
-    once once.Provider
-    db   db.Provider
-}
-
-func NewPaymentService(onceProvider once.Provider, dbProvider db.Provider) *PaymentService {
-    return &PaymentService{
-        once: onceProvider,
-        db:   dbProvider,
+    // 使用幂等器
+    orderID := "order123"
+    err = onceProvider.Do(ctx, fmt.Sprintf("payment:process:%s", orderID), 24*time.Hour, func() error {
+        // 执行支付处理逻辑
+        return processPayment(ctx, orderID)
+    })
+    
+    if err != nil {
+        logger.Error("支付处理失败", clog.Err(err))
+    } else {
+        logger.Info("支付处理完成")
     }
 }
 
-// Kafka 消费者逻辑
-func (s *PaymentService) HandlePaymentMessage(ctx context.Context, msg *mq.Message) error {
+func processPayment(ctx context.Context, orderID string) error {
+    // 支付处理逻辑
+    return nil
+}
+```
+
+### 5.2 消息队列消费者
+
+```go
+package consumer
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "time"
+    
+    "github.com/gochat-kit/once"
+    "github.com/gochat-kit/clog"
+    "github.com/gochat-kit/mq"
+)
+
+type PaymentConsumer struct {
+    onceProvider once.Provider
+    mqConsumer   mq.Consumer
+}
+
+func NewPaymentConsumer(onceProvider once.Provider, mqConsumer mq.Consumer) *PaymentConsumer {
+    return &PaymentConsumer{
+        onceProvider: onceProvider,
+        mqConsumer:   mqConsumer,
+    }
+}
+
+func (c *PaymentConsumer) Start(ctx context.Context) error {
+    return c.mqConsumer.Consume(ctx, "payment-topic", c.handlePaymentMessage)
+}
+
+func (c *PaymentConsumer) handlePaymentMessage(ctx context.Context, msg *mq.Message) error {
     logger := clog.WithContext(ctx)
     
-    // 使用消息的唯一ID作为幂等键
-    messageID := string(msg.Key)
-    key := "payment:process:" + messageID
-    
-    // 使用 once.Do 保证业务逻辑只执行一次
-    err := s.once.Do(ctx, key, 24*time.Hour, func() error {
-        // 核心业务逻辑：处理支付
-        var paymentData Payment
-        if err := json.Unmarshal(msg.Value, &paymentData); err != nil {
-            return fmt.Errorf("解析支付数据失败: %w", err)
-        }
-        
-        logger.Info("开始处理支付", 
-            clog.String("payment_id", paymentData.ID),
-            clog.String("message_id", messageID))
-        
-        return s.processPayment(ctx, paymentData)
-    })
-
-    if err != nil {
-        // 记录错误，但不 ack 消息，以便 Kafka 重试
-        logger.Error("处理支付消息失败", 
-            clog.Err(err), 
-            clog.String("message_id", messageID))
+    // 解析消息
+    var paymentMessage PaymentMessage
+    if err := json.Unmarshal(msg.Value, &paymentMessage); err != nil {
+        logger.Error("解析支付消息失败", clog.Err(err))
         return err
     }
     
-    // 无论是否首次执行，都安全地 ack 消息
-    logger.Info("支付消息处理完成", clog.String("message_id", messageID))
+    // 构建幂等键
+    idempotencyKey := fmt.Sprintf("payment:process:%s", paymentMessage.OrderID)
+    
+    // 使用Execute保证幂等性和结果缓存
+    result, err := c.onceProvider.Execute(ctx, idempotencyKey, 24*time.Hour, func() (any, error) {
+        logger.Info("开始处理支付", clog.String("order_id", paymentMessage.OrderID))
+        
+        // 执行支付逻辑
+        err := c.processPayment(ctx, &paymentMessage)
+        if err != nil {
+            return nil, err
+        }
+        
+        // 返回处理结果
+        return &PaymentResult{
+            OrderID:    paymentMessage.OrderID,
+            Status:     "success",
+            ProcessedAt: time.Now(),
+        }, nil
+    })
+    
+    if err != nil {
+        logger.Error("支付处理失败", 
+            clog.Err(err), 
+            clog.String("order_id", paymentMessage.OrderID))
+        return err
+    }
+    
+    // 处理结果
+    paymentResult := result.(*PaymentResult)
+    logger.Info("支付处理完成", 
+        clog.String("order_id", paymentResult.OrderID),
+        clog.String("status", paymentResult.Status))
+    
     return nil
 }
 
-func (s *PaymentService) processPayment(ctx context.Context, payment Payment) error {
-    // 具体的支付处理逻辑
-    return s.db.DB(ctx).Create(&payment).Error
+func (c *PaymentConsumer) processPayment(ctx context.Context, msg *PaymentMessage) error {
+    // 实际的支付处理逻辑
+    return nil
 }
 ```
 
-### 场景 3: 防止 API 重复创建资源 (使用 `Execute`)
+### 5.3 HTTP接口幂等
 
 ```go
-// 在 HTTP Handler 中
-func (s *DocumentService) CreateDocument(c *gin.Context) {
+package handler
+
+import (
+    "context"
+    "net/http"
+    "time"
+    
+    "github.com/gin-gonic/gin"
+    "github.com/gochat-kit/once"
+    "github.com/gochat-kit/clog"
+)
+
+type OrderHandler struct {
+    onceProvider once.Provider
+}
+
+func NewOrderHandler(onceProvider once.Provider) *OrderHandler {
+    return &OrderHandler{
+        onceProvider: onceProvider,
+    }
+}
+
+func (h *OrderHandler) CreateOrder(c *gin.Context) {
+    ctx := c.Request.Context()
+    logger := clog.WithContext(ctx)
+    
+    // 获取幂等键
     idempotencyKey := c.GetHeader("X-Idempotency-Key")
     if idempotencyKey == "" {
-        c.JSON(http.StatusBadRequest, gin.H{"error": "idempotency key required"})
+        c.JSON(http.StatusBadRequest, gin.H{"error": "缺少幂等键"})
         return
     }
-
-    logger := clog.WithContext(c.Request.Context())
-    key := "doc:create:" + idempotencyKey
-
-    // 使用 once.Execute 来创建资源并缓存结果
-    result, err := s.once.Execute(c.Request.Context(), key, 48*time.Hour, func() (any, error) {
-        logger.Info("开始创建文档", clog.String("idempotency_key", idempotencyKey))
+    
+    // 构建幂等键
+    key := "order:create:" + idempotencyKey
+    
+    // 使用Execute保证创建操作的幂等性
+    result, err := h.onceProvider.Execute(ctx, key, 24*time.Hour, func() (any, error) {
+        logger.Info("开始创建订单", clog.String("idempotency_key", idempotencyKey))
         
-        // 核心业务逻辑：创建文档并返回其完整信息
-        var reqData CreateDocumentRequest
-        if err := c.ShouldBindJSON(&reqData); err != nil {
-            return nil, fmt.Errorf("请求参数错误: %w", err)
+        // 解析请求参数
+        var req CreateOrderRequest
+        if err := c.ShouldBindJSON(&req); err != nil {
+            return nil, err
         }
         
-        doc, err := s.createDocument(c.Request.Context(), reqData)
+        // 创建订单
+        order, err := h.createOrder(ctx, req)
         if err != nil {
-            return nil, fmt.Errorf("创建文档失败: %w", err)
+            return nil, err
         }
         
-        logger.Info("文档创建成功", 
-            clog.String("document_id", doc.ID),
+        logger.Info("订单创建成功", 
+            clog.String("order_id", order.ID),
             clog.String("idempotency_key", idempotencyKey))
         
-        return doc, nil
+        return order, nil
     })
-
+    
     if err != nil {
-        logger.Error("文档创建失败", 
+        logger.Error("创建订单失败", 
             clog.Err(err), 
             clog.String("idempotency_key", idempotencyKey))
         c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
         return
     }
-
-    // 无论是否首次执行，都能拿到正确的文档信息
-    doc := result.(*Document)
-    logger.Info("返回文档信息", 
-        clog.String("document_id", doc.ID),
-        clog.Bool("from_cache", result != nil))
     
-    c.JSON(http.StatusOK, gin.H{"document": doc})
+    // 返回结果
+    order := result.(*Order)
+    c.JSON(http.StatusOK, gin.H{"order": order})
 }
 
-func (s *DocumentService) createDocument(ctx context.Context, req CreateDocumentRequest) (*Document, error) {
-    doc := &Document{
-        ID:      s.uid.GetUUIDV7(), // 使用 UID 组件生成ID
-        Title:   req.Title,
-        Content: req.Content,
-        Created: time.Now(),
-    }
-    
-    err := s.db.DB(ctx).Create(doc).Error
-    return doc, err
+func (h *OrderHandler) createOrder(ctx context.Context, req CreateOrderRequest) (*Order, error) {
+    // 实际的订单创建逻辑
+    return &Order{}, nil
 }
 ```
 
-### 场景 4: 幂等状态管理
+## 6. 最佳实践
+
+### 6.1 幂等键设计
+
+1. **分层命名**：使用分层命名空间，如 `业务域:操作类型:业务ID`
+2. **唯一性保证**：确保幂等键的唯一性和可重复性
+3. **TTL设置**：根据业务特点合理设置过期时间
+4. **前缀隔离**：通过前缀实现不同服务和环境的隔离
+
+### 6.2 性能优化
+
+1. **结果缓存**：对计算密集型操作启用结果缓存
+2. **本地缓存**：对频繁访问的键进行本地缓存
+3. **批量操作**：支持批量幂等检查，减少网络开销
+4. **异步清理**：异步清理过期状态，减少阻塞
+
+### 6.3 错误处理
+
+1. **重试机制**：对临时性错误实现自动重试
+2. **降级策略**：幂等器异常时的降级处理
+3. **监控告警**：对异常情况进行监控和告警
+4. **日志记录**：记录幂等操作的详细信息
+
+### 6.4 分布式环境
+
+1. **Redis集群**：使用Redis集群提高可用性
+2. **脚本优化**：优化Lua脚本性能
+3. **连接池**：合理配置Redis连接池
+4. **超时设置**：设置合理的超时时间
+
+## 7. 监控和运维
+
+### 7.1 关键指标
+
+- **操作次数**：总操作数和成功率
+- **缓存命中率**：结果缓存的命中率
+- **响应时间**：幂等检查的响应时间
+- **错误率**：各种错误的统计
+
+### 7.2 日志规范
+
+- 使用clog组件记录幂等操作日志
+- 记录操作结果和执行时间
+- 支持链路追踪集成
+
+### 7.3 故障排除
+
+1. **幂等失效**：检查键设计和TTL设置
+2. **性能问题**：检查Redis配置和网络状况
+3. **状态不一致**：检查Redis数据一致性
+4. **内存泄漏**：检查本地缓存和状态管理
+
+## 8. 配置示例
+
+### 8.1 基础配置
 
 ```go
-// 管理接口：清除幂等状态（用于数据订正或手动重试）
-func (s *AdminService) ClearIdempotentState(ctx context.Context, key string) error {
-    logger := clog.WithContext(ctx)
-    
-    // 直接调用 Clear，无需预先检查
-    // 如果 key 不存在，Clear 操作通常是无害的
-    if err := s.once.Clear(ctx, key); err != nil {
-        logger.Error("清除幂等状态失败", clog.Err(err), clog.String("key", key))
-        return fmt.Errorf("清除幂等状态失败: %w", err)
-    }
-    
-    logger.Info("幂等状态清除成功", clog.String("key", key))
-    return nil
+// 开发环境配置
+config := &once.Config{
+    Mode:        "local",
+    ServiceName: "payment-service-dev",
+    KeyPrefix:   "idempotent:",
+    DefaultTTL:  24 * time.Hour,
+    LocalConfig: once.LocalConfig{
+        CleanupInterval: 1 * time.Hour,
+        MaxEntries:     10000,
+    },
+}
+
+// 生产环境配置
+config := &once.Config{
+    Mode:        "distributed",
+    ServiceName: "payment-service-prod",
+    KeyPrefix:   "idempotent:",
+    DefaultTTL:  24 * time.Hour,
+    DistributedConfig: once.DistributedConfig{
+        RedisKeyPrefix:   "idempotent:",
+        ResultKeyPrefix:  "result:",
+        LockTimeout:      30 * time.Second,
+    },
 }
 ```
 
-## 4. 设计注记
+### 8.2 高级配置
 
-### 4.1 GetDefaultConfig 默认值说明
-
-`GetDefaultConfig` 根据环境返回优化的默认配置：
-
-**开发环境 (development)**:
 ```go
-&Config{
-    Mode:        "local",              // 使用单机模式，无 Redis 依赖
-    ServiceName: "",                   // 需要用户设置
-    KeyPrefix:   "idempotent:",        // 默认前缀
+// 启用监控和配置中心
+opts := []once.Option{
+    once.WithLogger(logger),
+    once.WithCacheProvider(cacheProvider),
+    once.WithMetricsProvider(metricsProvider),
+    once.WithCoordProvider(coordProvider),
+    once.WithTTL(48 * time.Hour),
+    once.WithRetryCount(3),
+    once.WithRetryInterval(1 * time.Second),
 }
 ```
-
-**生产环境 (production)**:
-```go
-&Config{
-    Mode:        "distributed",       // 使用分布式模式，依赖 cache.Provider
-    ServiceName: "",                  // 需要用户设置
-    KeyPrefix:   "idempotent:",       // 默认前缀
-}
-```
-
-用户仍需要根据实际部署环境覆盖 `ServiceName` 等关键配置。
-
-### 4.2 分布式 vs 单机模式选择
-
-**分布式模式 (distributed)**:
-- **优势**: 集群级别的幂等保证，多实例间状态一致
-- **适用场景**: 微服务集群、水平扩展的应用、消息队列消费者
-- **依赖**: 需要 Redis 和 cache.Provider
-- **性能**: 略低（网络 I/O 开销）
-
-**单机模式 (local)**:
-- **优势**: 极高性能，无网络依赖，简单可靠
-- **适用场景**: 单实例部署、内存密集型操作、开发测试环境
-- **依赖**: 无额外依赖
-- **限制**: 无法跨实例协调
-
-### 4.3 幂等键设计最佳实践
-
-**命名规范**: 建议使用分层命名，如 `{业务域}:{操作类型}:{业务ID}`
-- `payment:process:order-123`
-- `user:register:email-abc@example.com`
-- `doc:create:idempotency-xyz`
-
-**TTL 设置**: 根据业务特点合理设置过期时间
-- 短期操作（API 调用）: 1-24 小时
-- 长期操作（批处理）: 7-30 天
-- 关键操作（支付）: 永久保存或长期保存
-
-**前缀隔离**: 通过 `KeyPrefix` 实现不同服务、环境的命名空间隔离
-
-### 4.4 错误处理和重试机制
-
-**业务逻辑失败**: 如果 `Do` 或 `Execute` 中的回调函数返回错误，幂等标记不会被设置，允许后续重试
-
-**幂等器异常**: 如果幂等器本身异常（如 Redis 连接失败），建议的降级策略：
-- 关键操作：抛出错误，阻止执行
-- 非关键操作：记录日志，继续执行
-
-**数据一致性**: 在分布式模式下，使用 Lua 脚本确保 Redis 操作的原子性

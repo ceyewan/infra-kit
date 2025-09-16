@@ -1,214 +1,704 @@
-# 基础设施: DB 数据库
+# 基础设施: db 数据库访问
 
 ## 1. 设计理念
 
-`db` 是 `gochat` 项目的数据库基础设施组件，基于 `GORM v2` 构建。它是一个**专注于 MySQL** 的、以**分库分表**为核心设计的高性能数据库操作层。
+`db` 是 `gochat-kit` 项目的数据库访问组件，基于 `GORM v2` 构建。它是一个专注于 MySQL 的高性能数据库操作层，提供了分库分表、连接池管理、事务处理等核心功能。
 
-`db` 组件的设计哲学是 **“封装便利，但不隐藏能力”**。它封装了数据库连接、配置、事务和分片等复杂逻辑，同时通过 `DB()` 方法提供了对原生 `*gorm.DB` 的完全访问，让开发者可以利用 GORM 的全部功能，保证了灵活性。
+### 核心设计原则
+
+- **封装但不隐藏**: 封装 GORM 的复杂性，同时通过 `DB()` 方法提供对原生 `*gorm.DB` 的完全访问
+- **分库分表支持**: 基于 `gorm.io/sharding` 实现自动分片，支持水平扩展
+- **连接池优化**: 智能的连接池管理，支持高并发访问
+- **事务安全**: 提供简洁的事务 API，确保数据一致性
+- **监控集成**: 集成日志和监控，提供数据库操作的可观测性
+
+### 组件价值
+
+- **性能提升**: 通过连接池和分片技术，支持高并发和大数据量场景
+- **开发效率**: 简化数据库操作，提供统一的 API 接口
+- **可扩展性**: 分库分表支持，支持业务规模的线性扩展
+- **运维友好**: 集成监控和日志，便于问题排查和性能优化
 
 ## 2. 核心 API 契约
 
-### 2.1 构造函数与 Options
+### 2.1 构造函数与配置
 
 ```go
-// Config 是 db 组件的主配置结构体。
+// Config 是 db 组件的配置结构体
 type Config struct {
-	DSN             string          `json:"dsn"`             // 数据库连接字符串
-	Driver          string          `json:"driver"`          // 数据库驱动，仅支持 "mysql"
-	MaxOpenConns    int             `json:"maxOpenConns"`    // 最大打开连接数
-	MaxIdleConns    int             `json:"maxIdleConns"`    // 最大空闲连接数
-	ConnMaxLifetime time.Duration   `json:"connMaxLifetime"` // 连接最大生命周期
-	LogLevel        string          `json:"logLevel"`        // GORM 日志级别: "silent", "info", "warn", "error"
-	SlowThreshold   time.Duration   `json:"slowThreshold"`   // 慢查询阈值
-	Sharding        *ShardingConfig `json:"sharding"`        // 分片配置，可选
+    DSN             string          `json:"dsn"`             // 数据库连接字符串
+    Driver          string          `json:"driver"`          // 数据库驱动，仅支持 "mysql"
+    MaxOpenConns    int             `json:"maxOpenConns"`    // 最大打开连接数
+    MaxIdleConns    int             `json:"maxIdleConns"`    // 最大空闲连接数
+    ConnMaxLifetime time.Duration   `json:"connMaxLifetime"` // 连接最大生命周期
+    ConnMaxIdleTime time.Duration   `json:"connMaxIdleTime"` // 连接最大空闲时间
+    LogLevel        string          `json:"logLevel"`        // GORM 日志级别
+    SlowThreshold   time.Duration   `json:"slowThreshold"`   // 慢查询阈值
+    Sharding        *ShardingConfig `json:"sharding"`        // 分片配置，可选
 }
 
-// GetDefaultConfig 返回默认的数据库配置。
-// 开发环境：较少连接数，较详细的日志级别，较短的超时时间
-// 生产环境：较多连接数，较少的日志输出，较长的连接生命周期
-func GetDefaultConfig(env string) Config
-
-// ShardingConfig 定义了分库分表配置。
+// ShardingConfig 分库分表配置
 type ShardingConfig struct {
-	ShardingKey    string                     `json:"shardingKey"`    // 分片键字段名，如 "user_id"
-	NumberOfShards int                        `json:"numberOfShards"` // 分片总数，如 16
-	Tables         map[string]*TableShardingConfig `json:"tables"`     // 表名到分片配置的映射
+    ShardingKey    string                        `json:"shardingKey"`    // 分片键字段名
+    NumberOfShards int                           `json:"numberOfShards"` // 分片总数
+    Tables         map[string]*TableShardingConfig `json:"tables"`     // 表分片配置
 }
 
-// TableShardingConfig 定义了单个表的分片配置。
+// TableShardingConfig 单表分片配置
 type TableShardingConfig struct {
-	ShardingKey    string `json:"shardingKey,omitempty"`    // 可选：覆盖全局分片键
-	NumberOfShards int    `json:"numberOfShards,omitempty"` // 可选：覆盖全局分片数
+    ShardingKey    string `json:"shardingKey,omitempty"`    // 覆盖全局分片键
+    NumberOfShards int    `json:"numberOfShards,omitempty"` // 覆盖全局分片数
 }
 
-// Option 定义了用于定制 db Provider 的函数。
-type Option func(*provider)
+// GetDefaultConfig 返回环境相关的默认配置
+func GetDefaultConfig(env string) *Config
 
-// WithLogger 将一个 clog.Logger 实例注入 GORM，用于结构化记录 SQL 日志。
-// 这是与 clog 组件联动的推荐做法。
-func WithLogger(logger *clog.Logger) Option
+// Option 功能选项
+type Option func(*options)
 
-// WithComponentName 设置组件名称，用于日志和监控标识。
-func WithComponentName(name string) Option
+// WithLogger 注入日志依赖
+func WithLogger(logger clog.Logger) Option
 
-// New 是创建数据库 Provider 实例的唯一入口。
-func New(ctx context.Context, config Config, opts ...Option) (Provider, error)
+// WithCoordProvider 注入配置中心依赖，用于动态配置管理
+func WithCoordProvider(coord coord.Provider) Option
+
+// WithMetricsProvider 注入监控依赖
+func WithMetricsProvider(metrics metrics.Provider) Option
+
+// New 创建 db Provider 实例
+func New(ctx context.Context, config *Config, opts ...Option) (Provider, error)
 ```
 
-### 2.2 Provider 接口
-
-`Provider` 接口定义了数据库操作的核心能力。
+### 2.2 Provider 接口设计
 
 ```go
-// Provider 提供了访问数据库的能力。
+// Provider 是 db 组件的主接口
 type Provider interface {
-	// DB 从当前请求的上下文中获取一个 gorm.DB 实例用于执行查询。
-	// 返回的 *gorm.DB 实例是轻量级且无状态的，应在需要时调用此方法获取，不要长期持有。
-	DB(ctx context.Context) *gorm.DB
-
-	// Transaction 执行一个数据库事务。
-	// 传入的 ctx 会被自动应用到事务实例 tx 上，使用者无需再次调用 tx.WithContext(ctx)。
-	// 回调函数中的任何 error 都会导致事务回滚。
-	Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error
-
-	// AutoMigrate 自动迁移数据库表结构，能正确处理分片表的创建。
-	AutoMigrate(ctx context.Context, dst ...interface{}) error
-
-	// Ping 检查数据库连接。
-	Ping(ctx context.Context) error
-	
-	// Close 关闭数据库连接池。
-	Close() error
+    // DB 获取带上下文的数据库实例
+    DB(ctx context.Context) *gorm.DB
+    // Transaction 执行事务
+    Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error
+    // AutoMigrate 自动迁移表结构
+    AutoMigrate(ctx context.Context, dst ...interface{}) error
+    // Ping 检查数据库连接
+    Ping(ctx context.Context) error
+    // Close 关闭数据库连接
+    Close() error
+    // HealthCheck 健康检查
+    HealthCheck(ctx context.Context) error
 }
 ```
 
-## 3. 标准用法
-
-### 场景 1: 基本 CRUD 操作
+### 2.3 分片相关接口
 
 ```go
-// 在服务初始化时注入 dbProvider
+// ShardingDB 分片数据库接口
+type ShardingDB interface {
+    // GetShardIndex 获取分片索引
+    GetShardIndex(shardingKey interface{}) (int, error)
+    // GetShardTable 获取分片表名
+    GetShardTable(tableName string, shardingKey interface{}) (string, error)
+    // ExecuteOnShard 在指定分片上执行操作
+    ExecuteOnShard(ctx context.Context, shardIndex int, fn func(*gorm.DB) error) error
+}
+
+// ShardInfo 分片信息
+type ShardInfo struct {
+    Index      int    `json:"index"`       // 分片索引
+    TableName  string `json:"tableName"`   // 分片表名
+    Connection string `json:"connection"`  // 连接信息
+    Status     string `json:"status"`      // 分片状态
+}
+```
+
+## 3. 实现要点
+
+### 3.1 连接池管理
+
+```go
+type dbProvider struct {
+    db      *gorm.DB
+    config  *Config
+    logger  clog.Logger
+    metrics metrics.Provider
+    coord   coord.Provider
+    
+    // 分片相关
+    sharding *shardingManager
+    
+    // 连接池监控
+    poolStats *sql.DBStats
+}
+
+func (p *dbProvider) createDB(config *Config) (*gorm.DB, error) {
+    // 创建基础连接
+    sqlDB, err := sql.Open("mysql", config.DSN)
+    if err != nil {
+        return nil, fmt.Errorf("创建数据库连接失败: %w", err)
+    }
+    
+    // 配置连接池
+    sqlDB.SetMaxOpenConns(config.MaxOpenConns)
+    sqlDB.SetMaxIdleConns(config.MaxIdleConns)
+    sqlDB.SetConnMaxLifetime(config.ConnMaxLifetime)
+    sqlDB.SetConnMaxIdleTime(config.ConnMaxIdleTime)
+    
+    // 创建 GORM 实例
+    gormConfig := &gorm.Config{
+        Logger: p.createGormLogger(),
+        NamingStrategy: schema.NamingStrategy{
+            TablePrefix:   "",
+            SingularTable: true,
+        },
+    }
+    
+    db, err := gorm.Open(mysql.New(mysql.Config{
+        Conn: sqlDB,
+    }), gormConfig)
+    if err != nil {
+        return nil, fmt.Errorf("创建 GORM 实例失败: %w", err)
+    }
+    
+    // 配置分片
+    if config.Sharding != nil {
+        if err := p.setupSharding(db, config.Sharding); err != nil {
+            return nil, fmt.Errorf("配置分片失败: %w", err)
+        }
+    }
+    
+    return db, nil
+}
+```
+
+### 3.2 分片管理
+
+```go
+type shardingManager struct {
+    config      *ShardingConfig
+    shardFunc   func(interface{}) int
+    shards      map[int]*gorm.DB
+    shardStates map[string]*ShardInfo
+    mu          sync.RWMutex
+}
+
+func (p *dbProvider) setupSharding(db *gorm.DB, config *ShardingConfig) error {
+    p.sharding = &shardingManager{
+        config:      config,
+        shardFunc:   p.createShardFunction(),
+        shards:      make(map[int]*gorm.DB),
+        shardStates: make(map[string]*ShardInfo),
+    }
+    
+    // 注册分片插件
+    err := db.Use(sharding.Register(sharding.Config{
+        ShardingKey: config.ShardingKey,
+        NumberOfShards: config.NumberOfShards,
+        PrimaryKeyGenerator: func(table string, column string, value interface{}) (string, error) {
+            // 生成主键的逻辑
+            return fmt.Sprintf("%s_%v", table, value), nil
+        },
+    }, sharding.NewMySQL()))
+    
+    if err != nil {
+        return fmt.Errorf("注册分片插件失败: %w", err)
+    }
+    
+    // 初始化分片连接
+    return p.initializeShards(db)
+}
+
+func (p *dbProvider) createShardFunction() func(interface{}) int {
+    return func(key interface{}) int {
+        var hash int64
+        
+        switch v := key.(type) {
+        case int, int8, int16, int32, int64:
+            hash = int64(v)
+        case uint, uint8, uint16, uint32, uint64:
+            hash = int64(v)
+        case string:
+            // 字符串哈希
+            hash = p.stringHash(v)
+        default:
+            // 其他类型转换为字符串后哈希
+            hash = p.stringHash(fmt.Sprintf("%v", v))
+        }
+        
+        // 取绝对值并取模
+        abs := hash
+        if abs < 0 {
+            abs = -abs
+        }
+        return int(abs % int64(p.sharding.config.NumberOfShards))
+    }
+}
+
+func (p *dbProvider) stringHash(s string) int64 {
+    var hash int64 = 5381
+    for _, c := range s {
+        hash = ((hash << 5) + hash) + int64(c)
+    }
+    return hash
+}
+```
+
+### 3.3 事务管理
+
+```go
+func (p *dbProvider) Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
+    logger := clog.WithContext(ctx)
+    
+    // 获取数据库实例
+    db := p.db.WithContext(ctx)
+    
+    // 开始事务
+    tx := db.Begin()
+    defer func() {
+        if r := recover(); r != nil {
+            tx.Rollback()
+            logger.Error("事务 panic", clog.Any("recover", r))
+        }
+    }()
+    
+    // 执行事务函数
+    if err := fn(tx); err != nil {
+        // 事务回滚
+        if rbErr := tx.Rollback().Error; rbErr != nil {
+            logger.Error("事务回滚失败", 
+                clog.Err(err), 
+                clog.Err("rollback_error", rbErr))
+        } else {
+            logger.Warn("事务回滚成功", clog.Err(err))
+        }
+        return err
+    }
+    
+    // 提交事务
+    if err := tx.Commit().Error; err != nil {
+        logger.Error("事务提交失败", clog.Err(err))
+        return err
+    }
+    
+    logger.Info("事务提交成功")
+    return nil
+}
+```
+
+### 3.4 监控和健康检查
+
+```go
+func (p *dbProvider) startMetricsCollection(ctx context.Context) {
+    ticker := time.NewTicker(30 * time.Second)
+    defer ticker.Stop()
+    
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            p.collectMetrics()
+        }
+    }
+}
+
+func (p *dbProvider) collectMetrics() {
+    if p.db == nil {
+        return
+    }
+    
+    sqlDB, err := p.db.DB()
+    if err != nil {
+        return
+    }
+    
+    stats := sqlDB.Stats()
+    
+    // 上报连接池指标
+    if p.metrics != nil {
+        p.metrics.Gauge("db.pool.open_connections", float64(stats.OpenConnections))
+        p.metrics.Gauge("db.pool.in_use", float64(stats.InUse))
+        p.metrics.Gauge("db.pool.idle", float64(stats.Idle))
+        p.metrics.Gauge("db.pool.wait_count", float64(stats.WaitCount))
+        p.metrics.Gauge("db.pool.wait_duration", float64(stats.WaitDuration.Milliseconds()))
+    }
+}
+
+func (p *dbProvider) HealthCheck(ctx context.Context) error {
+    if p.db == nil {
+        return fmt.Errorf("数据库未初始化")
+    }
+    
+    sqlDB, err := p.db.DB()
+    if err != nil {
+        return fmt.Errorf("获取数据库连接失败: %w", err)
+    }
+    
+    // 检查连接
+    if err := sqlDB.Ping(); err != nil {
+        return fmt.Errorf("数据库连接失败: %w", err)
+    }
+    
+    // 检查连接池状态
+    stats := sqlDB.Stats()
+    if stats.OpenConnections <= 0 {
+        return fmt.Errorf("连接池中没有可用连接")
+    }
+    
+    // 检查分片状态
+    if p.sharding != nil {
+        if err := p.checkShardsHealth(ctx); err != nil {
+            return fmt.Errorf("分片健康检查失败: %w", err)
+        }
+    }
+    
+    return nil
+}
+```
+
+## 4. 标准用法示例
+
+### 4.1 基础初始化
+
+```go
+func main() {
+    ctx := context.Background()
+    
+    // 1. 初始化数据库组件
+    config := db.GetDefaultConfig("production")
+    config.DSN = "user:password@tcp(localhost:3306)/app_db?charset=utf8mb4&parseTime=True&loc=Local"
+    
+    // 配置分片
+    config.Sharding = &db.ShardingConfig{
+        ShardingKey:    "user_id",
+        NumberOfShards: 16,
+        Tables: map[string]*db.TableShardingConfig{
+            "orders": {
+                ShardingKey:    "user_id",
+                NumberOfShards: 16,
+            },
+            "payments": {
+                ShardingKey:    "user_id",
+                NumberOfShards: 8,
+            },
+        },
+    }
+    
+    dbProvider, err := db.New(ctx, config,
+        db.WithLogger(clog.Namespace("db")),
+        db.WithCoordProvider(coordProvider),
+        db.WithMetricsProvider(metricsProvider),
+    )
+    if err != nil {
+        log.Fatal("数据库初始化失败:", err)
+    }
+    defer dbProvider.Close()
+}
+```
+
+### 4.2 基本 CRUD 操作
+
+```go
 type UserService struct {
     db db.Provider
 }
 
-func initializeDB() (db.Provider, error) {
-    // 使用默认配置（推荐），或从配置中心加载
-    config := db.GetDefaultConfig("development") // "development" or "production"
+func (s *UserService) CreateUser(ctx context.Context, req *CreateUserRequest) (*User, error) {
+    logger := clog.WithContext(ctx)
     
-    // 根据需要覆盖特定配置
-    config.DSN = "user:password@tcp(127.0.0.1:3306)/gochat?charset=utf8mb4&parseTime=True&loc=Local"
-    
-    return db.New(context.Background(), config, db.WithLogger(clog.Namespace("gorm")))
-}
-
-// 在业务方法中使用
-func (s *UserService) CreateUser(ctx context.Context, username string) (*User, error) {
-    user := &User{Username: username}
-    
-    // 从 Provider 获取 gorm.DB 实例，上下文已通过参数传入
-    result := s.db.DB(ctx).Create(user)
-    if result.Error != nil {
-        return nil, result.Error
+    user := &User{
+        ID:        uuid.New().String(),
+        Username:  req.Username,
+        Email:     req.Email,
+        CreatedAt: time.Now(),
+        UpdatedAt: time.Now(),
     }
     
+    // 插入用户
+    if err := s.db.DB(ctx).Create(user).Error; err != nil {
+        logger.Error("创建用户失败", clog.Err(err))
+        return nil, fmt.Errorf("创建用户失败: %w", err)
+    }
+    
+    logger.Info("用户创建成功", clog.String("user_id", user.ID))
     return user, nil
+}
+
+func (s *UserService) GetUser(ctx context.Context, userID string) (*User, error) {
+    logger := clog.WithContext(ctx)
+    
+    var user User
+    if err := s.db.DB(ctx).Where("id = ?", userID).First(&user).Error; err != nil {
+        if errors.Is(err, gorm.ErrRecordNotFound) {
+            return nil, fmt.Errorf("用户不存在")
+        }
+        logger.Error("查询用户失败", clog.Err(err))
+        return nil, fmt.Errorf("查询用户失败: %w", err)
+    }
+    
+    return &user, nil
 }
 ```
 
-### 场景 2: 执行事务
-
-`Transaction` 方法封装了事务的提交和回滚逻辑，是执行事务的首选方式。
+### 4.3 事务操作
 
 ```go
-func (s *AccountService) Transfer(ctx context.Context, fromUserID, toUserID string, amount int64) error {
+func (s *OrderService) CreateOrder(ctx context.Context, req *CreateOrderRequest) (*Order, error) {
+    logger := clog.WithContext(ctx)
+    
+    var order *Order
+    err := s.db.Transaction(ctx, func(tx *gorm.DB) error {
+        // 1. 扣减库存
+        if err := s.decreaseInventory(ctx, tx, req.ProductID, req.Quantity); err != nil {
+            return fmt.Errorf("扣减库存失败: %w", err)
+        }
+        
+        // 2. 创建订单
+        order = &Order{
+            ID:         uuid.New().String(),
+            UserID:     req.UserID,
+            ProductID:  req.ProductID,
+            Quantity:   req.Quantity,
+            Amount:     req.Amount,
+            Status:     "pending",
+            CreatedAt:  time.Now(),
+        }
+        
+        if err := tx.Create(order).Error; err != nil {
+            return fmt.Errorf("创建订单失败: %w", err)
+        }
+        
+        // 3. 创建支付记录
+        payment := &Payment{
+            ID:        uuid.New().String(),
+            OrderID:   order.ID,
+            Amount:    req.Amount,
+            Status:    "pending",
+            CreatedAt: time.Now(),
+        }
+        
+        if err := tx.Create(payment).Error; err != nil {
+            return fmt.Errorf("创建支付记录失败: %w", err)
+        }
+        
+        logger.Info("订单创建成功", 
+            clog.String("order_id", order.ID),
+            clog.String("user_id", req.UserID))
+        
+        return nil
+    })
+    
+    if err != nil {
+        return nil, err
+    }
+    
+    return order, nil
+}
+```
+
+### 4.4 分片查询
+
+```go
+func (s *OrderService) GetUserOrders(ctx context.Context, userID string, page, pageSize int) ([]*Order, int64, error) {
+    logger := clog.WithContext(ctx)
+    
+    // 计算分页偏移量
+    offset := (page - 1) * pageSize
+    
+    var orders []*Order
+    var total int64
+    
+    // 在分片表中查询用户订单
+    if err := s.db.DB(ctx).Model(&Order{}).
+        Where("user_id = ?", userID).
+        Count(&total).Error; err != nil {
+        logger.Error("查询订单总数失败", clog.Err(err))
+        return nil, 0, fmt.Errorf("查询订单失败: %w", err)
+    }
+    
+    if err := s.db.DB(ctx).Where("user_id = ?", userID).
+        Order("created_at DESC").
+        Offset(offset).
+        Limit(pageSize).
+        Find(&orders).Error; err != nil {
+        logger.Error("查询订单列表失败", clog.Err(err))
+        return nil, 0, fmt.Errorf("查询订单失败: %w", err)
+    }
+    
+    logger.Info("查询用户订单成功", 
+        clog.String("user_id", userID),
+        clog.Int64("total", total),
+        clog.Int("count", len(orders)))
+    
+    return orders, total, nil
+}
+```
+
+### 4.5 批量操作
+
+```go
+func (s *UserService) BatchUpdateUsers(ctx context.Context, updates []*UserUpdate) error {
+    logger := clog.WithContext(ctx)
+    
+    // 使用事务进行批量更新
     return s.db.Transaction(ctx, func(tx *gorm.DB) error {
-        // tx 已经是带事务和上下文的 *gorm.DB 实例，可以直接使用
-
-        // 1. 扣款
-        if err := tx.Model(&Account{}).Where("user_id = ?", fromUserID).Update("balance", gorm.Expr("balance - ?", amount)).Error; err != nil {
-            // 返回任意 error 都会导致事务回滚
-            return err
+        for _, update := range updates {
+            if err := tx.Model(&User{}).
+                Where("id = ?", update.ID).
+                Updates(update).Error; err != nil {
+                logger.Error("批量更新用户失败", 
+                    clog.String("user_id", update.ID),
+                    clog.Err(err))
+                return err
+            }
         }
-
-        // 2. 加款
-        if err := tx.Model(&Account{}).Where("user_id = ?", toUserID).Update("balance", gorm.Expr("balance + ?", amount)).Error; err != nil {
-            return err
-        }
-
-        // 函数正常返回，事务会自动提交
+        
+        logger.Info("批量更新用户成功", clog.Int("count", len(updates)))
         return nil
     })
 }
 ```
 
-## 4. 设计注记
+## 5. 高级特性
 
-### 4.1 分片机制详解
+### 5.1 动态配置支持
 
-本组件的分片功能基于 `gorm.io/sharding` 库实现，并注册了自定义的分片算法。
-
--   **分片配置层次**:
-    -   **全局配置**: `ShardingConfig` 中的 `ShardingKey` 和 `NumberOfShards` 作为所有分片表的默认值。
-    -   **表级配置**: `TableShardingConfig` 可以为特定表覆盖全局设置。如果 `ShardingKey` 或 `NumberOfShards` 为空/0，则使用全局配置。
-
--   **分片键 (Sharding Key) 类型**:
-    -   **整数类型** (`int`, `int64`, `uint64` 等): 直接使用其数值。
-    -   **字符串类型** (`string`):
-        1.  **优先解析**: 尝试将字符串按十进制解析为整数。
-        2.  **哈希备选**: 若无法解析，则使用 `hash = hash*31 + char_code` 算法计算哈希值。
-
--   **路由逻辑**:
-    1.  获取分片键的数值（或哈希值）。
-    2.  取该值的**绝对值**。
-    3.  对分片总数 (`NumberOfShards`) 进行**取模**，得到分片索引。
-    4.  最终表名后缀格式为 `_XX`，例如 `messages_01`, `messages_15`。
-
--   **重要行为**:
-    -   **无分片键查询**: 如果一个查询没有在 `WHERE` 条件中包含分片键，`gorm.io/sharding` 的默认行为是**返回错误**，以防止危险的全部分片扫描。
-    -   **AutoMigrate**: 调用 `AutoMigrate` 时，它会为每个分片都创建或更新表结构，例如，为 `messages` 表和 16 个分片创建 `messages_00` 到 `messages_15` 的所有表。
-
-### 4.2 GORM 实例生命周期
-
-从 `db.DB(ctx)` 获取的 `*gorm.DB` 实例是轻量级且无状态的。它只是一个包含了数据库连接池和上下文信息的会话对象。因此，最佳实践是：
-
--   **即用即取**: 在每个需要执行数据库操作的函数中，都通过调用 `db.DB(ctx)` 来获取一个新的会话实例。
--   **禁止持有**: 不要在 `struct` 中长期持有 `*gorm.DB` 实例，因为这会使其绑定的上下文失效，并可能导致并发问题。应始终持有 `db.Provider` 接口。
-
-### 4.3 错误处理最佳实践
-
-**分片查询错误**: 当查询分片表时未提供分片键，`gorm.io/sharding` 会返回错误。业务代码应该妥善处理这类错误，避免意外的全表扫描。
-
-**事务错误**: 在 `Transaction` 方法的回调函数中，任何返回的 `error` 都会导致事务自动回滚。这是故意设计的安全机制。
-
-### 4.4 GetDefaultConfig 默认值说明
-
-`GetDefaultConfig` 根据环境返回优化的默认配置：
-
-**开发环境 (development)**:
 ```go
-&Config{
-    Driver:          "mysql",
-    MaxOpenConns:    25,          // 较少连接数，适合开发环境
-    MaxIdleConns:    5,           // 较少空闲连接
-    ConnMaxLifetime: 5*time.Minute,  // 较短生命周期，便于调试
-    LogLevel:        "info",      // 详细日志，便于开发调试
-    SlowThreshold:   100*time.Millisecond, // 较严格的慢查询阈值
-    Sharding:        nil,         // 默认不开启分片
+func (p *dbProvider) watchConfigChanges(ctx context.Context) {
+    if p.coord == nil {
+        return
+    }
+    
+    configPath := "/config/db/"
+    watcher, err := p.coord.Config().WatchPrefix(ctx, configPath, &p.config)
+    if err != nil {
+        p.logger.Error("监听数据库配置失败", clog.Err(err))
+        return
+    }
+    
+    go func() {
+        for range watcher.Changes() {
+            p.updateConnection()
+        }
+    }()
+}
+
+func (p *dbProvider) updateConnection() {
+    // 获取新配置
+    newConfig := p.getConfigFromCoord()
+    if newConfig == nil {
+        return
+    }
+    
+    // 更新连接池配置
+    sqlDB, err := p.db.DB()
+    if err != nil {
+        return
+    }
+    
+    sqlDB.SetMaxOpenConns(newConfig.MaxOpenConns)
+    sqlDB.SetMaxIdleConns(newConfig.MaxIdleConns)
+    sqlDB.SetConnMaxLifetime(newConfig.ConnMaxLifetime)
+    
+    p.logger.Info("数据库配置已更新")
 }
 ```
 
-**生产环境 (production)**:
+### 5.2 慢查询监控
+
 ```go
-&Config{
-    Driver:          "mysql",
-    MaxOpenConns:    100,         // 较多连接数，支持高并发
-    MaxIdleConns:    10,          // 适当的空闲连接池
-    ConnMaxLifetime: 1*time.Hour, // 较长生命周期，减少连接重建开销
-    LogLevel:        "warn",      // 只记录警告和错误，减少日志量
-    SlowThreshold:   500*time.Millisecond, // 较宽松的慢查询阈值
-    Sharding:        nil,         // 默认不开启分片
+func (p *dbProvider) createGormLogger() logger.Interface {
+    return logger.New(
+        log.New(os.Stdout, "\r\n", log.LstdFlags),
+        logger.Config{
+            SlowThreshold: p.config.SlowThreshold,
+            LogLevel:      parseLogLevel(p.config.LogLevel),
+            Colorful:      false,
+        },
+    )
+}
+
+func parseLogLevel(level string) logger.LogLevel {
+    switch level {
+    case "debug":
+        return logger.Info
+    case "info":
+        return logger.Info
+    case "warn":
+        return logger.Warn
+    case "error":
+        return logger.Error
+    case "silent":
+        return logger.Silent
+    default:
+        return logger.Warn
+    }
 }
 ```
 
-用户仍需要根据实际情况设置 `DSN` 和可选的 `Sharding` 配置。
+### 5.3 连接池健康检查
+
+```go
+func (p *dbProvider) checkConnectionPool() error {
+    if p.db == nil {
+        return fmt.Errorf("数据库未初始化")
+    }
+    
+    sqlDB, err := p.db.DB()
+    if err != nil {
+        return fmt.Errorf("获取数据库连接失败: %w", err)
+    }
+    
+    stats := sqlDB.Stats()
+    
+    // 检查连接数是否合理
+    if stats.OpenConnections > p.config.MaxOpenConns {
+        return fmt.Errorf("连接数超过限制: %d > %d", stats.OpenConnections, p.config.MaxOpenConns)
+    }
+    
+    // 检查等待数量
+    if stats.WaitCount > 1000 {
+        return fmt.Errorf("连接等待次数过多: %d", stats.WaitCount)
+    }
+    
+    // 检查平均等待时间
+    if stats.WaitDuration > 5*time.Second {
+        return fmt.Errorf("连接等待时间过长: %v", stats.WaitDuration)
+    }
+    
+    return nil
+}
+```
+
+## 6. 最佳实践
+
+### 6.1 连接池配置
+
+- **开发环境**: 连接数较少，便于调试
+- **生产环境**: 根据业务负载合理配置连接数
+- **监控指标**: 定期监控连接池使用情况
+- **动态调整**: 支持运行时调整连接池配置
+
+### 6.2 事务使用
+
+- **短事务**: 保持事务简短，避免长事务
+- **错误处理**: 正确处理事务错误，确保数据一致性
+- **嵌套事务**: 避免过度使用嵌套事务
+- **超时控制**: 设置合理的超时时间
+
+### 6.3 分片策略
+
+- **分片键选择**: 选择高基数的字段作为分片键
+- **数据均匀**: 确保数据在分片间均匀分布
+- **查询优化**: 优先使用分片键进行查询
+- **扩容考虑**: 预留扩容空间
+
+### 6.4 性能优化
+
+- **索引优化**: 合理设计索引，提高查询性能
+- **批量操作**: 使用批量操作减少数据库访问次数
+- **连接复用**: 复用数据库连接，减少连接开销
+- **缓存策略**: 合理使用缓存，减少数据库压力
+
+---
+
+*遵循这些指南可以确保数据库组件的高质量实现和稳定运行。*

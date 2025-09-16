@@ -1,246 +1,326 @@
-# 基础设施: Cache 分布式缓存
+# 分布式缓存组件实现指南
 
 ## 1. 设计理念
 
-`cache` 是 `gochat` 项目的统一分布式缓存组件，默认基于 `Redis` 实现。它旨在提供一个高性能、功能丰富且类型安全的缓存层。
+`cache` 组件是一个高性能的分布式缓存组件，基于 Redis 实现。它旨在为微服务架构提供统一、可靠、易用的缓存解决方案。
 
-`cache` 组件的设计哲学是 **"封装但不隐藏"**。它将 `go-redis` 的底层复杂性封装在一个简洁、统一的 `Provider` 接口之后，同时通过组合多个小接口（如 `StringOperations`, `HashOperations`）来清晰地组织其丰富的功能。此外，它还内置了分布式锁和布隆过滤器等高级功能，为上层业务提供了强大的支持。
+### 核心设计原则
+
+- **封装但不隐藏**: 将 Redis 的复杂性封装在简洁的 API 后面
+- **类型安全**: 提供强类型的操作接口，避免运行时错误
+- **功能丰富**: 支持字符串、哈希、集合、有序集合等多种数据结构
+- **高可用性**: 内置分布式锁和连接池管理
+- **易于测试**: 提供清晰的接口和测试工具
+
+### 组件价值
+
+- **性能提升**: 通过缓存减少数据库访问压力
+- **可扩展性**: 支持集群部署和水平扩展
+- **一致性**: 提供分布式锁保证数据一致性
+- **可观测性**: 集成日志和监控支持
 
 ## 2. 核心 API 契约
 
-### 2.1 构造函数
+### 2.1 构造函数与配置
 
 ```go
-// Config 是 cache 组件的配置结构体。
+// Config 组件配置结构
 type Config struct {
-    // Addr 是 Redis 服务器地址，格式为 "host:port"
-    Addr            string        `json:"addr"`
-    // Password 是 Redis 认证密码，可选
-    Password        string        `json:"password"`
-    // DB 是 Redis 数据库编号，默认为 0
-    DB              int           `json:"db"`
-    // PoolSize 是连接池大小，0 表示使用默认值 (CPU核数 * 10)
-    PoolSize        int           `json:"poolSize"`
-    // DialTimeout 是连接超时时间
-    DialTimeout     time.Duration `json:"dialTimeout"`
-    // ReadTimeout 是读取超时时间
-    ReadTimeout     time.Duration `json:"readTimeout"`
-    // WriteTimeout 是写入超时时间
-    WriteTimeout    time.Duration `json:"writeTimeout"`
-    // KeyPrefix 为所有 key 自动添加前缀，用于命名空间隔离，强烈推荐设置
-    KeyPrefix       string        `json:"keyPrefix"`
-    // MinIdleConns 是连接池中的最小空闲连接数
-    MinIdleConns    int           `json:"minIdleConns"`
-    // MaxRetries 是命令执行的最大重试次数
-    MaxRetries      int           `json:"maxRetries"`
+    Addr            string        `json:"addr"`            // Redis 服务器地址
+    Password        string        `json:"password"`        // 认证密码
+    DB              int           `json:"db"`              // 数据库编号
+    PoolSize        int           `json:"poolSize"`        // 连接池大小
+    DialTimeout     time.Duration `json:"dialTimeout"`     // 连接超时
+    ReadTimeout     time.Duration `json:"readTimeout"`     // 读取超时
+    WriteTimeout    time.Duration `json:"writeTimeout"`    // 写入超时
+    KeyPrefix       string        `json:"keyPrefix"`       // Key 前缀
+    MinIdleConns    int           `json:"minIdleConns"`    // 最小空闲连接
+    MaxRetries      int           `json:"maxRetries"`      // 最大重试次数
 }
 
-// GetDefaultConfig 返回默认的 cache 配置。
-// 开发环境：较少的连接数，较短的超时时间，无密码认证
-// 生产环境：较多的连接数，较长的超时时间，启用重试机制
+// GetDefaultConfig 返回环境相关默认配置
 func GetDefaultConfig(env string) *Config
 
+// Option 功能选项
 type Option func(*options)
 
-// WithLogger 将一个 clog.Logger 实例注入 cache，用于记录内部日志。
+// WithLogger 注入日志依赖
 func WithLogger(logger clog.Logger) Option
 
-// New 创建一个新的 cache Provider 实例。
-// 这是与 cache 组件交互的唯一入口。
+// WithCoordProvider 注入配置中心依赖
+func WithCoordProvider(coord coord.Provider) Option
+
+// New 创建缓存组件实例
 func New(ctx context.Context, config *Config, opts ...Option) (Provider, error)
 ```
 
-### 2.2 Provider 接口
-
-`Provider` 接口是所有缓存操作的总入口，它通过方法将不同的 Redis 数据结构操作分离开。
+### 2.2 Provider 接口设计
 
 ```go
-// ErrCacheMiss 表示在缓存中未找到指定的 key。
-// 所有 Get 操作在缓存未命中时，都应返回此错误。
-var ErrCacheMiss = errors.New("cache: key not found")
-
-// Provider 定义了 cache 组件提供的所有能力。
+// Provider 缓存组件主接口
 type Provider interface {
-    String() StringOperations
-    Hash() HashOperations
-    Set() SetOperations
-    ZSet() ZSetOperations
-    Lock() LockOperations
-    Bloom() BloomFilterOperations
-    Script() ScriptingOperations
-
-    // Ping 检查与 Redis 服务器的连接。
-    Ping(ctx context.Context) error
-    // Close 关闭所有与 Redis 的连接。
-    Close() error
+    String() StringOperations      // 字符串操作
+    Hash() HashOperations          // 哈希操作
+    Set() SetOperations            // 集合操作
+    ZSet() ZSetOperations          // 有序集合操作
+    Lock() LockOperations          // 分布式锁
+    Bloom() BloomFilterOperations  // 布隆过滤器
+    Script() ScriptingOperations   // 脚本操作
+    
+    Ping(ctx context.Context) error   // 连接检查
+    Close() error                    // 资源清理
 }
+
+// 标准错误定义
+var ErrCacheMiss = errors.New("cache: key not found")
 ```
 
 ### 2.3 功能子接口
 
-`Provider` 组合了多个功能单一的子接口，使得 API 非常清晰。
-
+#### 字符串操作
 ```go
-// StringOperations 定义了所有与 Redis 字符串相关的操作。
 type StringOperations interface {
-    // Get 获取一个 key。如果 key 不存在，将返回 cache.ErrCacheMiss 错误。
     Get(ctx context.Context, key string) (string, error)
-    // Set 存入一个 key-value 对。
-    // 注意：value (interface{}) 参数需要调用者自行序列化为字符串或字节数组。
     Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error
     Del(ctx context.Context, keys ...string) error
     Incr(ctx context.Context, key string) (int64, error)
     Decr(ctx context.Context, key string) (int64, error)
     Exists(ctx context.Context, keys ...string) (int64, error)
-    // SetNX (Set if Not Exists) 存入一个 key-value 对，仅当 key 不存在时。
-    // 注意：value (interface{}) 参数需要调用者自行序列化。
     SetNX(ctx context.Context, key string, value interface{}, expiration time.Duration) (bool, error)
-    // GetSet 设置新值并返回旧值。如果 key 不存在，返回 cache.ErrCacheMiss。
-    // 注意：value (interface{}) 参数需要调用者自行序列化。
     GetSet(ctx context.Context, key string, value interface{}) (string, error)
 }
+```
 
-// HashOperations 定义了所有与 Redis 哈希相关的操作。
+#### 哈希操作
+```go
 type HashOperations interface {
-    // HGet 获取哈希表 key 中一个 field 的值。如果 key 或 field 不存在，返回 cache.ErrCacheMiss。
     HGet(ctx context.Context, key, field string) (string, error)
-    // HSet 设置哈希表 key 中一个 field 的值。
-    // 注意：value (interface{}) 参数需要调用者自行序列化。
     HSet(ctx context.Context, key, field string, value interface{}) error
     HGetAll(ctx context.Context, key string) (map[string]string, error)
     HDel(ctx context.Context, key string, fields ...string) error
     HExists(ctx context.Context, key, field string) (bool, error)
     HLen(ctx context.Context, key string) (int64, error)
 }
+```
 
-// SetOperations 定义了所有与 Redis 集合相关的操作。
-type SetOperations interface {
-    SAdd(ctx context.Context, key string, members ...interface{}) error
-    SRem(ctx context.Context, key string, members ...interface{}) error
-    SMembers(ctx context.Context, key string) ([]string, error)
-    SIsMember(ctx context.Context, key string, member interface{}) (bool, error)
-    SCard(ctx context.Context, key string) (int64, error)
-}
-
-// ZMember 表示有序集合中的成员
+#### 有序集合操作
+```go
 type ZMember struct {
-    Member interface{} // 成员值
-    Score  float64     // 分数
+    Member interface{}
+    Score  float64
 }
 
-// ZSetOperations 定义了所有与 Redis 有序集合相关的操作。
 type ZSetOperations interface {
-    // ZAdd 添加一个或多个成员到有序集合
     ZAdd(ctx context.Context, key string, members ...*ZMember) error
-    // ZRange 获取有序集合中指定范围内的成员，按分数从低到高排序
     ZRange(ctx context.Context, key string, start, stop int64) ([]*ZMember, error)
-    // ZRevRange 获取有序集合中指定范围内的成员，按分数从高到低排序
     ZRevRange(ctx context.Context, key string, start, stop int64) ([]*ZMember, error)
-    // ZRangeByScore 获取指定分数范围内的成员
     ZRangeByScore(ctx context.Context, key string, min, max float64) ([]*ZMember, error)
-    // ZRem 从有序集合中移除一个或多个成员
     ZRem(ctx context.Context, key string, members ...interface{}) error
-    // ZRemRangeByRank 移除有序集合中指定排名区间内的成员
-    ZRemRangeByRank(ctx context.Context, key string, start, stop int64) error
-    // ZCard 获取有序集合的成员数量
     ZCard(ctx context.Context, key string) (int64, error)
-    // ZCount 获取指定分数范围内的成员数量
     ZCount(ctx context.Context, key string, min, max float64) (int64, error)
-    // ZScore 获取成员的分数
-    ZScore(ctx context.Context, key string, member string) (float64, error)
-    // ZSetExpire 为有序集合设置过期时间
-    ZSetExpire(ctx context.Context, key string, expiration time.Duration) error
 }
+```
 
-// LockOperations 定义了分布式锁的操作。
+#### 分布式锁操作
+```go
 type LockOperations interface {
-    // Acquire 尝试获取一个锁。如果成功，返回一个 Locker 对象；否则返回错误。
     Acquire(ctx context.Context, key string, expiration time.Duration) (Locker, error)
 }
 
-// Locker 定义了锁对象的接口。
 type Locker interface {
-    // Unlock 释放锁
     Unlock(ctx context.Context) error
-    // Refresh 刷新锁的过期时间
     Refresh(ctx context.Context, expiration time.Duration) error
-}
-
-// BloomFilterOperations 定义了布隆过滤器的操作 (需要 RedisBloom 模块)。
-type BloomFilterOperations interface {
-    BFAdd(ctx context.Context, key string, item string) error
-    BFExists(ctx context.Context, key string, item string) (bool, error)
-    BFReserve(ctx context.Context, key string, errorRate float64, capacity uint64) error
-}
-
-// ScriptingOperations 定义了与 Redis Lua 脚本相关的操作。
-type ScriptingOperations interface {
-    EvalSha(ctx context.Context, sha1 string, keys []string, args ...interface{}) (interface{}, error)
-    ScriptLoad(ctx context.Context, script string) (string, error)
-    ScriptExists(ctx context.Context, sha1 ...string) ([]bool, error)
 }
 ```
 
-## 3. 标准用法
+## 3. 实现要点
 
-### 场景 1: 在服务启动时初始化 cache Provider
+### 3.1 连接池管理
 
 ```go
-// 在 main.go 中
+type redisProvider struct {
+    client   *redis.Client
+    config   *Config
+    logger   clog.Logger
+    coord    coord.Provider
+}
+
+func (p *redisProvider) createClient(config *Config) *redis.Client {
+    return redis.NewClient(&redis.Options{
+        Addr:         config.Addr,
+        Password:     config.Password,
+        DB:           config.DB,
+        PoolSize:     config.PoolSize,
+        MinIdleConns: config.MinIdleConns,
+        DialTimeout:  config.DialTimeout,
+        ReadTimeout:  config.ReadTimeout,
+        WriteTimeout: config.WriteTimeout,
+        MaxRetries:   config.MaxRetries,
+    })
+}
+```
+
+### 3.2 Key 前缀处理
+
+```go
+func (p *redisProvider) addPrefix(key string) string {
+    if p.config.KeyPrefix == "" {
+        return key
+    }
+    return p.config.KeyPrefix + key
+}
+
+func (p *redisProvider) addPrefixes(keys []string) []string {
+    if p.config.KeyPrefix == "" {
+        return keys
+    }
+    
+    result := make([]string, len(keys))
+    for i, key := range keys {
+        result[i] = p.config.KeyPrefix + key
+    }
+    return result
+}
+```
+
+### 3.3 分布式锁实现
+
+```go
+type redisLocker struct {
+    client   *redis.Client
+    key      string
+    value    string
+    logger   clog.Logger
+}
+
+func (p *redisProvider) Acquire(ctx context.Context, key string, expiration time.Duration) (Locker, error) {
+    fullKey := p.addPrefix(key)
+    value := uuid.New().String()
+    
+    // 使用 SETNX 命令原子性地获取锁
+    acquired, err := p.client.SetNX(ctx, fullKey, value, expiration).Result()
+    if err != nil {
+        return nil, fmt.Errorf("获取锁失败: %w", err)
+    }
+    
+    if !acquired {
+        return nil, fmt.Errorf("锁已被占用")
+    }
+    
+    return &redisLocker{
+        client: p.client,
+        key:    fullKey,
+        value:  value,
+        logger: p.logger,
+    }, nil
+}
+
+func (l *redisLocker) Unlock(ctx context.Context) error {
+    // 使用 Lua 脚本确保只有锁的持有者才能释放
+    script := `
+        if redis.call("GET", KEYS[1]) == ARGV[1] then
+            return redis.call("DEL", KEYS[1])
+        else
+            return 0
+        end
+    `
+    
+    result, err := l.client.Eval(ctx, script, []string{l.key}, l.value).Result()
+    if err != nil {
+        return fmt.Errorf("释放锁失败: %w", err)
+    }
+    
+    if result.(int64) == 0 {
+        return fmt.Errorf("锁已过期或被其他进程持有")
+    }
+    
+    return nil
+}
+```
+
+### 3.4 动态配置支持
+
+```go
+func (p *redisProvider) watchConfigChanges(ctx context.Context) {
+    if p.coord == nil {
+        return
+    }
+    
+    configPath := "/config/cache/"
+    watcher, err := p.coord.Config().WatchPrefix(ctx, configPath, &p.config)
+    if err != nil {
+        p.logger.Error("监听缓存配置失败", clog.Err(err))
+        return
+    }
+    
+    go func() {
+        for range watcher.Changes() {
+            p.updateConnection()
+        }
+    }()
+}
+
+func (p *redisProvider) updateConnection() {
+    // 重新创建连接
+    newClient := p.createClient(p.config)
+    
+    // 优雅关闭旧连接
+    if p.client != nil {
+        p.client.Close()
+    }
+    
+    p.client = newClient
+    p.logger.Info("缓存配置已更新，重新建立连接")
+}
+```
+
+## 4. 标准用法示例
+
+### 4.1 基础初始化
+
+```go
 func main() {
-    // ... 首先初始化 clog 和 coord ...
+    ctx := context.Background()
     
-    // 使用默认配置（推荐）
-    config := cache.GetDefaultConfig("production") // 或 "development"
+    // 1. 初始化日志
+    clog.Init(ctx, clog.GetDefaultConfig("production"), 
+        clog.WithNamespace("cache-service"))
     
-    // 根据实际部署环境覆盖特定配置
-    config.Addr = "redis-cluster:6379"
-    config.Password = "your-redis-password"
-    config.KeyPrefix = "gochat:"
+    // 2. 创建缓存组件
+    config := cache.GetDefaultConfig("production")
+    config.Addr = "redis:6379"
+    config.KeyPrefix = "my-service:"
     
-    // 创建 cache Provider
-    cacheProvider, err := cache.New(context.Background(), config, 
+    cacheProvider, err := cache.New(ctx, config,
         cache.WithLogger(clog.Namespace("cache")),
     )
     if err != nil {
-        clog.Fatal("初始化 cache 失败", clog.Err(err))
+        clog.Fatal("缓存初始化失败", clog.Err(err))
     }
     defer cacheProvider.Close()
     
-    // 验证连接
-    if err := cacheProvider.Ping(context.Background()); err != nil {
+    // 3. 验证连接
+    if err := cacheProvider.Ping(ctx); err != nil {
         clog.Fatal("Redis 连接失败", clog.Err(err))
     }
-    
-    clog.Info("cache Provider 初始化成功")
 }
 ```
 
-### 场景 2: 缓存用户信息
+### 4.2 缓存业务数据
 
 ```go
-// 在服务的构造函数中注入 cacheProvider
 type UserService struct {
     cache cache.Provider
     db    db.Provider
 }
 
-func NewUserService(cacheProvider cache.Provider, dbProvider db.Provider) *UserService {
-    return &UserService{
-        cache: cacheProvider,
-        db:    dbProvider,
-    }
-}
-
-// 在业务方法中使用
 func (s *UserService) GetUserProfile(ctx context.Context, userID string) (*Profile, error) {
     logger := clog.WithContext(ctx)
-    key := "user:" + userID + ":profile"
+    key := fmt.Sprintf("user:%s:profile", userID)
     
-    // 1. 尝试从缓存获取
+    // 尝试从缓存获取
     profileJSON, err := s.cache.String().Get(ctx, key)
     if err == nil {
-        // 缓存命中
         var profile Profile
         if json.Unmarshal([]byte(profileJSON), &profile) == nil {
             logger.Info("用户资料缓存命中", clog.String("user_id", userID))
@@ -248,284 +328,323 @@ func (s *UserService) GetUserProfile(ctx context.Context, userID string) (*Profi
         }
     }
     
-    logger.Info("用户资料缓存未命中，从数据库查询", clog.String("user_id", userID))
-    
-    // 2. 缓存未命中，从数据库获取
+    // 缓存未命中，从数据库获取
     profile, err := s.getUserFromDB(ctx, userID)
     if err != nil {
-        return nil, fmt.Errorf("从数据库获取用户资料失败: %w", err)
+        return nil, err
     }
     
-    // 3. 将结果写入缓存，设置 1 小时过期
-    profileJSON, _ := json.Marshal(profile)
-    if err := s.cache.String().Set(ctx, key, profileJSON, 1*time.Hour); err != nil {
-        logger.Error("写入用户资料缓存失败", clog.Err(err))
-        // 不影响业务流程，继续返回结果
+    // 写入缓存
+    profileData, _ := json.Marshal(profile)
+    if err := s.cache.String().Set(ctx, key, profileData, time.Hour); err != nil {
+        logger.Error("写入缓存失败", clog.Err(err))
     }
     
     return profile, nil
 }
-
-func (s *UserService) getUserFromDB(ctx context.Context, userID string) (*Profile, error) {
-    var profile Profile
-    err := s.db.DB(ctx).Where("id = ?", userID).First(&profile).Error
-    if err != nil {
-        return nil, err
-    }
-    return &profile, nil
-}
 ```
 
-### 场景 3: 使用分布式锁执行定时任务
+### 4.3 分布式锁使用
 
 ```go
-func (s *ReportService) GenerateDailyReport(ctx context.Context) error {
+func (s *OrderService) ProcessOrder(ctx context.Context, orderID string) error {
     logger := clog.WithContext(ctx)
     
-    // 尝试获取一个租期为 10 分钟的锁
-    lock, err := s.cache.Lock().Acquire(ctx, "lock:daily_report_job", 10*time.Minute)
+    // 获取分布式锁，防止重复处理
+    lock, err := s.cache.Lock().Acquire(ctx, fmt.Sprintf("lock:order:%s", orderID), 30*time.Second)
     if err != nil {
-        // 获取锁失败，说明已有其他实例在执行，当前实例直接退出
-        logger.Info("获取报表生成锁失败，任务已由其他实例执行")
-        return nil
+        return fmt.Errorf("获取订单处理锁失败: %w", err)
+    }
+    defer lock.Unlock(ctx)
+    
+    logger.Info("开始处理订单", clog.String("order_id", orderID))
+    
+    // 处理订单逻辑
+    if err := s.processOrderLogic(ctx, orderID); err != nil {
+        return fmt.Errorf("处理订单失败: %w", err)
     }
     
-    // 确保任务完成后释放锁
-    defer func() {
-        if err := lock.Unlock(context.Background()); err != nil {
-            logger.Error("释放报表生成锁失败", clog.Err(err))
-        }
-    }()
-
-    logger.Info("成功获取锁，开始生成日报表")
-    
-    // 执行报表生成逻辑
-    if err := s.generateReport(ctx); err != nil {
-        return fmt.Errorf("生成报表失败: %w", err)
-    }
-    
-    logger.Info("日报表生成完成")
+    logger.Info("订单处理完成", clog.String("order_id", orderID))
     return nil
 }
 ```
 
-### 场景 4: 使用 ZSET 管理会话消息记录
+### 4.4 有序集合使用
 
 ```go
-// SessionMessageService 管理会话的最近消息记录
-type SessionMessageService struct {
-    cache cache.Provider
-}
-
-func NewSessionMessageService(cacheProvider cache.Provider) *SessionMessageService {
-    return &SessionMessageService{
-        cache: cacheProvider,
+func (s *LeaderboardService) UpdateScore(ctx context.Context, userID string, score float64) error {
+    key := "leaderboard:global"
+    member := &cache.ZMember{
+        Member: userID,
+        Score:  score,
     }
-}
-
-// AddMessage 添加消息到会话，使用时间戳排序
-func (s *SessionMessageService) AddMessage(ctx context.Context, sessionID, messageID string) error {
-    logger := clog.WithContext(ctx)
-    key := "session:" + sessionID + ":messages"
-
-    // 使用时间戳作为分数
-    message := &cache.ZMember{
-        Member: messageID,
-        Score:  float64(time.Now().Unix()),
+    
+    // 更新用户分数
+    if err := s.cache.ZSet().ZAdd(ctx, key, member); err != nil {
+        return fmt.Errorf("更新排行榜分数失败: %w", err)
     }
-
-    // 添加消息到 ZSET
-    if err := s.cache.ZSet().ZAdd(ctx, key, message); err != nil {
-        return fmt.Errorf("添加消息失败: %w", err)
-    }
-
-    // 维护最近50条消息限制
+    
+    // 保持排行榜前100名
     count, err := s.cache.ZSet().ZCard(ctx, key)
     if err != nil {
-        return fmt.Errorf("获取消息数量失败: %w", err)
+        return fmt.Errorf("获取排行榜数量失败: %w", err)
     }
-
-    // 如果超过50条，移除多余的旧消息
-    if count > 50 {
-        err := s.cache.ZSet().ZRemRangeByRank(ctx, key, 0, count-51)
-        if err != nil {
-            logger.Error("移除旧消息失败", clog.Err(err))
-            // 不影响主流程
+    
+    if count > 100 {
+        if err := s.cache.ZSet().ZRemRangeByRank(ctx, key, 0, count-101); err != nil {
+            return fmt.Errorf("清理排行榜失败: %w", err)
         }
     }
-
-    // 设置过期时间，防止活跃会话内存占用过大
-    err = s.cache.ZSet().ZSetExpire(ctx, key, 2*time.Hour)
-    if err != nil {
-        logger.Error("设置会话过期时间失败", clog.Err(err))
-    }
-
+    
     return nil
 }
+```
 
-// GetRecentMessages 获取会话最近的消息记录
-func (s *SessionMessageService) GetRecentMessages(ctx context.Context, sessionID string, limit int) ([]string, error) {
-    key := "session:" + sessionID + ":messages"
+## 5. 测试策略
 
-    // 获取最新的N条消息
-    members, err := s.cache.ZSet().ZRevRange(ctx, key, 0, int64(limit-1))
-    if err != nil {
-        return nil, fmt.Errorf("获取最近消息失败: %w", err)
+### 5.1 单元测试
+
+```go
+func TestCacheStringOperations(t *testing.T) {
+    // 创建测试用的 Redis 容器
+    ctx := context.Background()
+    config := &cache.Config{
+        Addr:     "localhost:6379",
+        KeyPrefix: "test:",
     }
-
-    // 提取消息ID
-    var messageIDs []string
-    for _, member := range members {
-        if id, ok := member.Member.(string); ok {
-            messageIDs = append(messageIDs, id)
-        }
-    }
-
-    return messageIDs, nil
-}
-
-// GetMessagesByTimeRange 获取指定时间范围内的消息
-func (s *SessionMessageService) GetMessagesByTimeRange(ctx context.Context, sessionID string, startTime, endTime time.Time) ([]string, error) {
-    key := "session:" + sessionID + ":messages"
-
-    // 使用时间戳范围查询
-    minScore := float64(startTime.Unix())
-    maxScore := float64(endTime.Unix())
-
-    members, err := s.cache.ZSet().ZRangeByScore(ctx, key, minScore, maxScore)
-    if err != nil {
-        return nil, fmt.Errorf("按时间范围获取消息失败: %w", err)
-    }
-
-    // 提取消息ID并按时间排序
-    var messageIDs []string
-    for _, member := range members {
-        if id, ok := member.Member.(string); ok {
-            messageIDs = append(messageIDs, id)
-        }
-    }
-
-    return messageIDs, nil
+    
+    provider, err := cache.New(ctx, config)
+    assert.NoError(t, err)
+    defer provider.Close()
+    
+    // 测试字符串操作
+    err = provider.String().Set(ctx, "test_key", "test_value", time.Hour)
+    assert.NoError(t, err)
+    
+    value, err := provider.String().Get(ctx, "test_key")
+    assert.NoError(t, err)
+    assert.Equal(t, "test_value", value)
 }
 ```
 
-### 场景 5: 使用布隆过滤器进行重复检测
+### 5.2 集成测试
 
 ```go
-func (s *MessageService) CheckDuplicateMessage(ctx context.Context, messageID string) (bool, error) {
+func TestCacheWithCoord(t *testing.T) {
+    // 模拟配置中心
+    coord := mock.NewCoordProvider()
+    
+    // 创建带配置中心的缓存组件
+    config := cache.GetDefaultConfig("test")
+    provider, err := cache.New(context.Background(), config,
+        cache.WithCoordProvider(coord),
+    )
+    assert.NoError(t, err)
+    
+    // 测试动态配置更新
+    coord.UpdateConfig("/config/cache/pool_size", "50")
+    
+    // 验证配置更新效果
+    // ...
+}
+```
+
+## 6. 性能优化
+
+### 6.1 连接池优化
+
+```go
+// 根据应用规模调整连接池大小
+func getOptimalPoolSize() int {
+    cpuCount := runtime.NumCPU()
+    
+    // 开发环境
+    if os.Getenv("GO_ENV") == "development" {
+        return cpuCount * 2
+    }
+    
+    // 生产环境
+    return cpuCount * 10
+}
+```
+
+### 6.2 批量操作优化
+
+```go
+func (s *UserService) BatchGetUserProfiles(ctx context.Context, userIDs []string) ([]*Profile, error) {
     logger := clog.WithContext(ctx)
-    key := "bloom:duplicate_messages"
-
-    // 检查消息是否已存在
-    exists, err := s.cache.Bloom().BFExists(ctx, key, messageID)
+    
+    // 使用管道批量获取
+    pipe := s.cache.String().(*redisStringOperations).client.Pipeline()
+    
+    cmds := make([]*redis.StringCmd, len(userIDs))
+    for i, userID := range userIDs {
+        key := fmt.Sprintf("user:%s:profile", userID)
+        cmds[i] = pipe.Get(ctx, key)
+    }
+    
+    // 执行批量操作
+    _, err := pipe.Exec(ctx)
     if err != nil {
-        return false, fmt.Errorf("检查布隆过滤器失败: %w", err)
+        logger.Error("批量获取用户资料失败", clog.Err(err))
     }
-
-    if exists {
-        logger.Warn("检测到重复消息", clog.String("message_id", messageID))
-        return true, nil
+    
+    // 处理结果
+    var profiles []*Profile
+    var missingUserIDs []string
+    
+    for i, cmd := range cmds {
+        profileJSON, err := cmd.Result()
+        if err == redis.Nil {
+            missingUserIDs = append(missingUserIDs, userIDs[i])
+            continue
+        }
+        
+        if err != nil {
+            logger.Error("获取用户资料失败", clog.String("user_id", userIDs[i]), clog.Err(err))
+            continue
+        }
+        
+        var profile Profile
+        if json.Unmarshal([]byte(profileJSON), &profile) == nil {
+            profiles = append(profiles, &profile)
+        }
     }
-
-    // 添加到布隆过滤器
-    if err := s.cache.Bloom().BFAdd(ctx, key, messageID); err != nil {
-        logger.Error("添加到布隆过滤器失败", clog.Err(err))
-        // 不影响业务流程
+    
+    // 批量获取缺失的用户资料
+    if len(missingUserIDs) > 0 {
+        missingProfiles, err := s.batchGetUsersFromDB(ctx, missingUserIDs)
+        if err == nil {
+            profiles = append(profiles, missingProfiles...)
+        }
     }
-
-    return false, nil
+    
+    return profiles, nil
 }
 ```
 
-## 4. 设计注记
+### 6.3 错误处理优化
 
-### 4.1 GetDefaultConfig 默认值说明
-
-`GetDefaultConfig` 根据环境返回优化的默认配置：
-
-**开发环境 (development)**:
 ```go
-&Config{
-    Addr:            "localhost:6379",
-    Password:        "",                    // 无密码
-    DB:              0,                     // 默认数据库
-    PoolSize:        10,                    // 较少连接数
-    DialTimeout:     5 * time.Second,      // 较短连接超时
-    ReadTimeout:     3 * time.Second,      // 较短读取超时
-    WriteTimeout:    3 * time.Second,      // 较短写入超时
-    KeyPrefix:       "dev:",               // 开发环境前缀
-    MinIdleConns:    2,                    // 较少空闲连接
-    MaxRetries:      1,                    // 较少重试次数
+func (p *redisProvider) executeWithRetry(ctx context.Context, op func() error) error {
+    const maxRetries = 3
+    const retryDelay = 100 * time.Millisecond
+    
+    var lastErr error
+    
+    for i := 0; i < maxRetries; i++ {
+        err := op()
+        if err == nil {
+            return nil
+        }
+        
+        lastErr = err
+        
+        // 如果是网络错误，进行重试
+        if isNetworkError(err) && i < maxRetries-1 {
+            time.Sleep(retryDelay)
+            continue
+        }
+        
+        // 其他错误直接返回
+        return err
+    }
+    
+    return lastErr
 }
 ```
 
-**生产环境 (production)**:
+## 7. 监控与维护
+
+### 7.1 关键指标监控
+
 ```go
-&Config{
-    Addr:            "redis:6379",
-    Password:        "",                    // 需要用户覆盖
-    DB:              0,
-    PoolSize:        100,                   // 较多连接数
-    DialTimeout:     10 * time.Second,     // 较长连接超时
-    ReadTimeout:     5 * time.Second,      // 较长读取超时
-    WriteTimeout:    5 * time.Second,      // 较长写入超时
-    KeyPrefix:       "gochat:",            // 生产环境前缀
-    MinIdleConns:    10,                   // 较多空闲连接
-    MaxRetries:      3,                    // 较多重试次数
+func (p *redisProvider) collectMetrics(ctx context.Context) {
+    ticker := time.NewTicker(30 * time.Second)
+    defer ticker.Stop()
+    
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            p.reportMetrics()
+        }
+    }
+}
+
+func (p *redisProvider) reportMetrics() {
+    // 获取连接池状态
+    poolStats := p.client.PoolStats()
+    
+    // 上报到监控系统
+    metrics.Gauge("cache.pool.size", poolStats.TotalConns)
+    metrics.Gauge("cache.pool.idle", poolStats.IdleConns)
+    metrics.Gauge("cache.pool.active", poolStats.TotalConns-poolStats.IdleConns)
+    
+    // 获取 Redis 服务器状态
+    info, err := p.client.Info(context.Background()).Result()
+    if err != nil {
+        p.logger.Error("获取 Redis 信息失败", clog.Err(err))
+        return
+    }
+    
+    // 解析并上报关键指标
+    // ...
 }
 ```
 
-用户仍需要根据实际部署环境覆盖 `Addr`、`Password` 等关键配置。
+### 7.2 健康检查
 
-### 4.2 KeyPrefix 命名空间隔离
+```go
+func (p *redisProvider) HealthCheck(ctx context.Context) error {
+    // 检查连接状态
+    if err := p.Ping(ctx); err != nil {
+        return fmt.Errorf("Redis 连接失败: %w", err)
+    }
+    
+    // 检查连接池状态
+    poolStats := p.client.PoolStats()
+    if poolStats.TotalConns == 0 {
+        return fmt.Errorf("连接池中没有可用连接")
+    }
+    
+    // 检查内存使用情况
+    info, err := p.client.Info(ctx, "memory").Result()
+    if err != nil {
+        return fmt.Errorf("获取 Redis 内存信息失败: %w", err)
+    }
+    
+    // 解析内存使用情况
+    // ...
+    
+    return nil
+}
+```
 
-`KeyPrefix` 是一个重要的配置项，用于实现多环境、多服务的 key 命名空间隔离：
+## 8. 最佳实践
 
-- **多环境隔离**: `dev:`、`test:`、`prod:` 等前缀区分不同环境
-- **多服务隔离**: `gochat:user:`、`gochat:message:` 等前缀区分不同微服务
-- **自动拼接**: 组件会自动将 `KeyPrefix` 添加到所有 key 的前面
+### 8.1 缓存策略
 
-### 4.3 分布式锁的实现机制
+- **缓存穿透**: 对不存在的数据也设置缓存，设置较短的过期时间
+- **缓存击穿**: 使用分布式锁保护热点数据
+- **缓存雪崩**: 设置不同的过期时间，避免同时失效
+- **缓存更新**: 采用先更新数据库，再删除缓存的策略
 
-`LockOperations` 基于 Redis 的 `SET key value EX seconds NX` 命令实现：
+### 8.2 性能优化
 
-- **原子性保证**: 使用 Redis 的原子命令确保只有一个客户端能获取锁
-- **自动过期**: 通过 `expiration` 参数防止死锁
-- **唯一标识**: 每个锁都有唯一的 value 值，确保只有持锁者能释放
-- **安全释放**: 使用 Lua 脚本确保释放锁的原子性
+- **批量操作**: 尽可能使用管道和批量操作
+- **连接池**: 合理配置连接池大小
+- **序列化**: 选择高效的序列化方式
+- **内存管理**: 定期清理过期数据
 
-### 4.4 布隆过滤器支持
+### 8.3 错误处理
 
-`BloomFilterOperations` 需要 Redis 服务器安装 `RedisBloom` 模块：
+- **降级策略**: 缓存失败时降级到数据库
+- **重试机制**: 对网络错误进行适当重试
+- **日志记录**: 记录关键操作和错误信息
+- **监控告警**: 设置关键指标的监控和告警
 
-- **内存高效**: 适用于大规模数据的去重检测
-- **误判特性**: 可能有假阳性，但没有假阴性
-- **预配置**: 通过 `BFReserve` 预先配置误判率和容量
-- **持久化**: 数据持久化到 Redis，支持集群部署
+---
 
-### 4.6 ZSET 有序集合的设计与使用
-
-**时间戳排序策略**: ZSET 操作专门为会话消息管理优化，使用 Unix 时间戳作为分数，实现消息的时间排序。
-
-**内存管理机制**: 通过 `ZRemRangeByRank` 和 `ZSetExpire` 实现消息数量控制和内存占用管理，防止活跃会话无限增长。
-
-**会话生命周期**: 每个会话使用独立的 ZSET key，格式为 `session:{sessionID}:messages`，便于管理和清理。
-
-**性能优化**:
-- 使用 `ZRevRange` 获取最新消息，避免全量数据传输
-- 通过 `ZRangeByScore` 实现时间范围查询，支持历史消息回溯
-- 定期清理过期会话，避免内存碎片
-
-**典型应用场景**:
-1. **会话消息管理**: 维护每个会话最近50条消息记录
-2. **排行榜系统**: 实现实时分数排序和排名查询
-3. **时间序列数据**: 按时间顺序存储和查询事件记录
-4. **延迟队列**: 使用时间戳实现定时任务调度
-
-### 4.7 错误处理最佳实践
-
-**缓存穿透保护**: 对于不存在的数据，也应设置短期缓存（如空字符串或特定的 "null" 值），以防止恶意攻击。
-**缓存击穿保护**: 在高并发场景下，如果一个热点 key 失效，可能导致大量请求同时访问数据库。建议的解决方案是在缓存回源逻辑中，使用 `cache.Lock().Acquire()` 获取分布式锁，确保只有一个请求去加载数据库，其他请求等待结果。
-**降级机制**: 当 Redis 不可用时，应优雅降级到直接访问数据库，并记录错误。
-**日志记录**: 缓存操作失败应记录日志，但不影响主业务流程。
-**超时控制**: 通过 context 控制操作超时，避免长时间阻塞。
+*遵循这些指南可以确保缓存组件的高质量实现和稳定运行。*

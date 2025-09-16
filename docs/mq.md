@@ -1,481 +1,865 @@
-# 基础设施: MQ 消息队列
+# 基础设施: mq 消息队列
 
 ## 1. 设计理念
 
-`mq` 组件是 `gochat` 项目中用于与 `Kafka` 交互的唯一标准库。其设计核心是 **“极简与约定”**。
+`mq` 是 `gochat-kit` 项目的消息队列组件，基于 `Kafka` 构建。它为微服务架构提供了统一、可靠的消息传递解决方案。
 
-- **极简 (Simplicity)**: 提供一个极小化的 API 集合，只包含生产者和消费者的核心功能。目标是让业务开发者在不阅读 Kafka 文档的情况下，也能轻松、可靠地收发消息。
-- **约定 (Convention)**: 组件将遵循 `im-infra` 的核心规范。
-    - **配置驱动**: 所有 Kafka 的连接信息和行为配置均从 `coord` 获取，业务代码不直接接触配置。
-    - **自动偏移量管理**: `Consumer` 自动处理 offset 提交，业务逻辑只需关注消息处理本身，极大降低了消费者的实现复杂性。
-    - **内置可观测性**: 自动与 `clog` 集成，并实现了 `trace_id` 在消息 `Headers` 中的自动传递，保证了跨服务的调用链完整性。
+### 核心设计原则
+
+- **极简API**: 提供简洁的生产者和消费者接口，降低使用门槛
+- **配置驱动**: 通过配置中心管理 Kafka 配置，支持动态热更新
+- **自动管理**: 自动处理偏移量提交、重试、连接管理等复杂逻辑
+- **链路追踪**: 自动在消息中传递 trace_id，实现分布式调用链追踪
+- **高可靠性**: 支持多种确认级别和重试机制，确保消息传递可靠性
+
+### 组件价值
+
+- **异步通信**: 支持服务间的异步通信，提高系统响应速度
+- **解耦合**: 通过消息队列实现服务间的松耦合
+- **流量削峰**: 缓冲突发流量，保护下游服务
+- **数据分发**: 支持一对多的消息分发模式
 
 ## 2. 核心 API 契约
 
-### 2.1 构造函数
+### 2.1 构造函数与配置
 
 ```go
-// Config 是 mq 组件的配置结构体。
+// Config 是 mq 组件的配置结构体
 type Config struct {
-    // Brokers 是 Kafka 集群的地址列表
-    Brokers []string `json:"brokers"`
-    // SecurityProtocol 安全协议，如 "PLAINTEXT", "SASL_PLAINTEXT", "SASL_SSL"
-    SecurityProtocol string `json:"securityProtocol"`
-    // SASLMechanism SASL 认证机制，如 "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"
-    SASLMechanism string `json:"saslMechanism,omitempty"`
-    // SASLUsername SASL 用户名
-    SASLUsername string `json:"saslUsername,omitempty"`
-    // SASLPassword SASL 密码
-    SASLPassword string `json:"saslPassword,omitempty"`
-    // ProducerConfig 生产者专用配置
-    ProducerConfig *ProducerConfig `json:"producerConfig,omitempty"`
-    // ConsumerConfig 消费者专用配置
-    ConsumerConfig *ConsumerConfig `json:"consumerConfig,omitempty"`
+    Brokers          []string        `json:"brokers"`           // Kafka 集群地址列表
+    SecurityProtocol string          `json:"securityProtocol"`  // 安全协议
+    SASLMechanism    string          `json:"saslMechanism"`    // SASL 认证机制
+    SASLUsername     string          `json:"saslUsername"`     // SASL 用户名
+    SASLPassword     string          `json:"saslPassword"`     // SASL 密码
+    ProducerConfig   *ProducerConfig `json:"producerConfig"`   // 生产者配置
+    ConsumerConfig   *ConsumerConfig `json:"consumerConfig"`   // 消费者配置
 }
 
-// ProducerConfig 定义生产者的专用配置
+// ProducerConfig 生产者配置
 type ProducerConfig struct {
-    // Acks 确认级别: 0, 1, -1(all)
-    Acks int `json:"acks"`
-    // RetryMax 最大重试次数
-    RetryMax int `json:"retryMax"`
-    // BatchSize 批处理大小
-    BatchSize int `json:"batchSize"`
-    // LingerMs 延迟发送时间(毫秒)
-    LingerMs int `json:"lingerMs"`
+    Acks        int `json:"acks"`         // 确认级别: 0, 1, -1(all)
+    RetryMax    int `json:"retryMax"`     // 最大重试次数
+    BatchSize   int `json:"batchSize"`    // 批处理大小
+    LingerMs    int `json:"lingerMs"`     // 延迟发送时间
+    Compression int `json:"compression"`  // 压缩类型
 }
 
-// ConsumerConfig 定义消费者的专用配置
+// ConsumerConfig 消费者配置
 type ConsumerConfig struct {
-    // AutoOffsetReset 偏移量重置策略: "earliest", "latest"
-    AutoOffsetReset string `json:"autoOffsetReset"`
-    // EnableAutoCommit 是否启用自动提交偏移量
-    EnableAutoCommit bool `json:"enableAutoCommit"`
-    // AutoCommitIntervalMs 自动提交间隔(毫秒)
-    AutoCommitIntervalMs int `json:"autoCommitIntervalMs"`
-    // SessionTimeoutMs 会话超时时间(毫秒)
-    SessionTimeoutMs int `json:"sessionTimeoutMs"`
+    AutoOffsetReset      string `json:"autoOffsetReset"`      // 偏移量重置策略
+    EnableAutoCommit     bool   `json:"enableAutoCommit"`     // 启用自动提交
+    AutoCommitIntervalMs int    `json:"autoCommitIntervalMs"` // 自动提交间隔
+    SessionTimeoutMs     int    `json:"sessionTimeoutMs"`     // 会话超时时间
+    MaxPollRecords       int    `json:"maxPollRecords"`       // 最大拉取记录数
+    MaxPollIntervalMs    int    `json:"maxPollIntervalMs"`    // 最大拉取间隔
 }
 
-// GetDefaultConfig 返回默认的 mq 配置。
-// 开发环境：较少的重试次数，较小的批处理大小
-// 生产环境：较多的重试次数，较大的批处理大小，更强的持久性保证
+// GetDefaultConfig 返回环境相关的默认配置
 func GetDefaultConfig(env string) *Config
 
-// Option 定义了用于定制 mq Producer/Consumer 的函数。
+// Option 功能选项
 type Option func(*options)
 
-// WithLogger 将一个 clog.Logger 实例注入 mq，用于记录内部日志。
+// WithLogger 注入日志依赖
 func WithLogger(logger clog.Logger) Option
 
-// WithCoordProvider 注入 coord.Provider，用于从配置中心获取动态配置。
-func WithCoordProvider(provider coord.Provider) Option
+// WithCoordProvider 注入配置中心依赖
+func WithCoordProvider(coord coord.Provider) Option
 
-// NewProducer 创建一个新的消息生产者实例。
+// WithMetricsProvider 注入监控依赖
+func WithMetricsProvider(metrics metrics.Provider) Option
+
+// NewProducer 创建消息生产者
 func NewProducer(ctx context.Context, config *Config, opts ...Option) (Producer, error)
 
-// NewConsumer 创建一个新的消息消费者实例。
-// groupID 是 Kafka 的消费者组ID，用于实现负载均衡和故障转移。
+// NewConsumer 创建消息消费者
 func NewConsumer(ctx context.Context, config *Config, groupID string, opts ...Option) (Consumer, error)
 ```
 
-### 2.2 核心接口与数据结构
+### 2.2 消息结构
 
 ```go
-// Message 是跨服务的标准消息结构。
+// Message 消息结构
 type Message struct {
-	Topic   string
-	Key     []byte
-	Value   []byte
-	Headers map[string][]byte
+    Topic   string            `json:"topic"`   // 主题
+    Key     []byte            `json:"key"`     // 消息键
+    Value   []byte            `json:"value"`   // 消息值
+    Headers map[string][]byte `json:"headers"` // 消息头
+    Time    time.Time         `json:"time"`    // 消息时间
 }
 
-// Producer 是一个线程安全的消息生产者接口。
+// MessageAck 消息确认
+type MessageAck struct {
+    Topic     string    `json:"topic"`     // 主题
+    Partition int32     `json:"partition"` // 分区
+    Offset    int64     `json:"offset"`    // 偏移量
+    Error     error     `json:"error"`     // 错误信息
+    Timestamp time.Time `json:"timestamp"` // 处理时间
+}
+```
+
+### 2.3 生产者接口
+
+```go
+// Producer 消息生产者接口
 type Producer interface {
-	// Send 异步发送消息。此方法立即返回，并通过回调函数处理发送结果。
-	// 这是推荐的、性能最高的方式。
-	Send(ctx context.Context, msg *Message, callback func(error))
-
-	// SendSync 同步发送消息。此方法将阻塞直到消息发送成功或失败。
-	// 适用于需要强一致性保证的场景。
-	SendSync(ctx context.Context, msg *Message) error
-
-	// Close 关闭生产者，并确保所有缓冲区的消息都已发送。
-	Close() error
+    // Send 异步发送消息
+    Send(ctx context.Context, msg *Message, callback func(*MessageAck)) error
+    // SendSync 同步发送消息
+    SendSync(ctx context.Context, msg *Message) (*MessageAck, error)
+    // SendBatch 批量发送消息
+    SendBatch(ctx context.Context, messages []*Message, callback func([]*MessageAck)) error
+    // Flush 刷新缓冲区，确保所有消息都已发送
+    Flush(ctx context.Context) error
+    // Close 关闭生产者
+    Close() error
 }
 
-// ConsumeCallback 是标准的消息处理回调函数。
-// 返回 nil: 消息处理成功，偏移量将被自动提交。
-// 返回 error: 消息处理失败，偏移量不会被提交，消息将在后续被重新消费。
-type ConsumeCallback func(ctx context.Context, msg *Message) error
+// ProducerStats 生产者统计信息
+type ProducerStats struct {
+    MessagesSent     int64         `json:"messagesSent"`     // 发送消息数
+    BytesSent        int64         `json:"bytesSent"`        // 发送字节数
+    SendErrors       int64         `json:"sendErrors"`       // 发送错误数
+    RetryCount       int64         `json:"retryCount"`       // 重试次数
+    AverageLatency   time.Duration `json:"averageLatency"`   // 平均延迟
+    CurrentQueueSize int           `json:"currentQueueSize"` // 当前队列大小
+}
+```
 
-// Consumer 是一个消费者组的接口。
+### 2.4 消费者接口
+
+```go
+// Consumer 消息消费者接口
 type Consumer interface {
-	// Subscribe 订阅消息并根据处理结果决定是否提交偏移量。
-	// 只有当回调函数返回 nil (无错误) 时，偏移量才会被自动提交。
-	// 如果返回 error，偏移量将不会被提交，消息会在下一次拉取时被重新消费。
-	// 这是标准的、推荐的消费方式。
-	Subscribe(ctx context.Context, topics []string, callback ConsumeCallback) error
+    // Subscribe 订阅主题
+    Subscribe(ctx context.Context, topics []string, handler MessageHandler) error
+    // SubscribeWithMetadata 订阅主题并获取元数据
+    SubscribeWithMetadata(ctx context.Context, topics []string, handler MessageMetadataHandler) error
+    // Commit 手动提交偏移量
+    Commit(ctx context.Context) error
+    // Seek 重置偏移量
+    Seek(ctx context.Context, topic string, partition int32, offset int64) error
+    // Pause 暂停消费
+    Pause(ctx context.Context, topicPartitions map[string][]int32) error
+    // Resume 恢复消费
+    Resume(ctx context.Context, topicPartitions map[string][]int32) error
+    // Close 关闭消费者
+    Close() error
+}
 
-	// Close 优雅地关闭消费者，完成当前正在处理的消息并提交最后一次偏移量。
-	Close() error
+// MessageHandler 消息处理函数
+type MessageHandler func(ctx context.Context, msg *Message) error
+
+// MessageMetadataHandler 带元数据的消息处理函数
+type MessageMetadataHandler func(ctx context.Context, msg *Message, metadata *ConsumerMetadata) error
+
+// ConsumerMetadata 消费者元数据
+type ConsumerMetadata struct {
+    Topic     string    `json:"topic"`     // 主题
+    Partition int32     `json:"partition"` // 分区
+    Offset    int64     `json:"offset"`    // 偏移量
+    Timestamp time.Time `json:"timestamp"` // 消息时间
+    Headers   map[string][]byte `json:"headers"` // 消息头
+}
+
+// ConsumerStats 消费者统计信息
+type ConsumerStats struct {
+    MessagesConsumed    int64         `json:"messagesConsumed"`    // 消费消息数
+    BytesConsumed       int64         `json:"bytesConsumed"`       // 消费字节数
+    ProcessingErrors    int64         `json:"processingErrors"`    // 处理错误数
+    CommitErrors        int64         `json:"commitErrors"`        // 提交错误数
+    AverageProcessTime  time.Duration `json:"averageProcessTime"`  // 平均处理时间
+    Lag                int64         `json:"lag"`                // 消费延迟
 }
 ```
 
-## 3. 标准用法
+## 3. 实现要点
 
-### 场景 1: 基本初始化
-
-```go
-// 在服务的 main 函数中初始化 Producer 和 Consumer
-func main() {
-    // ... 首先初始化 clog 和 coord ...
-    clog.Init(...)
-    coordProvider, _ := coord.New(...)
-
-    // 1. 使用默认配置（推荐），或从配置中心加载
-    config := mq.GetDefaultConfig("development") // "development" or "production"
-    
-    // 2. 根据环境覆盖必要的配置
-    config.Brokers = []string{"localhost:9092"} // 开发环境单节点
-    // config.Brokers = []string{"kafka1:9092", "kafka2:9092", "kafka3:9092"} // 生产环境集群
-    
-    // 3. 创建 Producer 实例
-    producer, err := mq.NewProducer(
-        context.Background(),
-        config,
-        mq.WithLogger(clog.Module("mq-producer")),
-        mq.WithCoordProvider(coordProvider),
-    )
-    if err != nil {
-        log.Fatalf("初始化 mq producer 失败: %v", err)
-    }
-    defer producer.Close()
-    
-    // 4. 创建 Consumer 实例
-    consumer, err := mq.NewConsumer(
-        context.Background(),
-        config,
-        "notification-service-user-events-group", // 遵循命名规范的 GroupID
-        mq.WithLogger(clog.Module("mq-consumer")),
-        mq.WithCoordProvider(coordProvider),
-    )
-    if err != nil {
-        log.Fatalf("初始化 mq consumer 失败: %v", err)
-    }
-    defer consumer.Close()
-    
-    // 后续可以将 producer 和 consumer 注入到业务服务中
-    // ...
-}
-```
-
-### 场景 2: 生产者发送消息
+### 3.1 生产者实现
 
 ```go
-// 1. 在服务启动时初始化 Producer
-var mqConfig mq.Config
-// ... 从 coord 加载配置 ...
-producer, err := mq.NewProducer(context.Background(), &mqConfig)
-if err != nil {
-    log.Fatal(err)
+type kafkaProducer struct {
+    producer   sarama.SyncProducer
+    asyncProd  sarama.AsyncProducer
+    config     *Config
+    logger     clog.Logger
+    metrics    metrics.Provider
+    stats      *ProducerStats
+    statsMu    sync.RWMutex
 }
-defer producer.Close()
 
-// 2. 在业务逻辑中发送消息
-func (s *UserService) Register(ctx context.Context, user *User) error {
-    // ... 创建用户的业务逻辑 ...
-
-    eventData, err := json.Marshal(user)
-    if err != nil {
-        return fmt.Errorf("序列化用户事件失败: %w", err)
+func (p *kafkaProducer) Send(ctx context.Context, msg *Message, callback func(*MessageAck)) error {
+    // 自动添加 trace_id 到消息头
+    if msg.Headers == nil {
+        msg.Headers = make(map[string][]byte)
     }
     
-    msg := &mq.Message{
-        Topic: "user.events.registered",
-        Key:   []byte(user.ID),
-        Value: eventData,
+    if traceID := getTraceID(ctx); traceID != "" {
+        msg.Headers["X-Trace-ID"] = []byte(traceID)
     }
-
-    // 使用异步发送（推荐），并记录可能的错误
-    // trace_id 会自动从 ctx 中提取并注入到消息头
-    s.producer.Send(ctx, msg, func(err error) {
-        if err != nil {
-            clog.WithContext(ctx).Error("发送用户注册事件失败", clog.Err(err))
-        } else {
-            clog.WithContext(ctx).Info("用户注册事件发送成功", clog.String("user_id", user.ID))
+    
+    // 创建 Kafka 消息
+    kafkaMsg := &sarama.ProducerMessage{
+        Topic:   msg.Topic,
+        Key:     sarama.ByteEncoder(msg.Key),
+        Value:   sarama.ByteEncoder(msg.Value),
+        Headers: convertHeaders(msg.Headers),
+    }
+    
+    // 异步发送
+    p.asyncProd.SendMessage(kafkaMsg, func(message *sarama.ProducerMessage, err error) {
+        ack := &MessageAck{
+            Topic:     message.Topic,
+            Partition: message.Partition,
+            Offset:    message.Offset,
+            Timestamp: time.Now(),
         }
+        
+        if err != nil {
+            ack.Error = err
+            p.incrementError()
+        } else {
+            p.incrementSuccess(message)
+        }
+        
+        callback(ack)
     })
     
     return nil
 }
 
-// 对于需要强一致性的场景，使用同步发送
-func (s *OrderService) CreateOrder(ctx context.Context, order *Order) error {
-    // ... 创建订单的业务逻辑 ...
-
-    eventData, err := json.Marshal(order)
+func (p *kafkaProducer) SendSync(ctx context.Context, msg *Message) (*MessageAck, error) {
+    startTime := time.Now()
+    
+    // 添加 trace_id
+    if msg.Headers == nil {
+        msg.Headers = make(map[string][]byte)
+    }
+    
+    if traceID := getTraceID(ctx); traceID != "" {
+        msg.Headers["X-Trace-ID"] = []byte(traceID)
+    }
+    
+    kafkaMsg := &sarama.ProducerMessage{
+        Topic:   msg.Topic,
+        Key:     sarama.ByteEncoder(msg.Key),
+        Value:   sarama.ByteEncoder(msg.Value),
+        Headers: convertHeaders(msg.Headers),
+    }
+    
+    // 同步发送
+    partition, offset, err := p.producer.SendMessage(kafkaMsg)
     if err != nil {
-        return fmt.Errorf("序列化订单事件失败: %w", err)
+        p.incrementError()
+        return nil, err
     }
     
-    msg := &mq.Message{
-        Topic: "order.events.created",
-        Key:   []byte(order.ID),
-        Value: eventData,
-    }
-
-    // 使用同步发送，确保消息发送成功后再返回
-    if err := s.producer.SendSync(ctx, msg); err != nil {
-        return fmt.Errorf("发送订单创建事件失败: %w", err)
-    }
+    p.incrementSuccess(kafkaMsg)
     
-    clog.WithContext(ctx).Info("订单创建事件发送成功", clog.String("order_id", order.ID))
-    return nil
+    return &MessageAck{
+        Topic:     msg.Topic,
+        Partition: partition,
+        Offset:    offset,
+        Timestamp: time.Now(),
+    }, nil
 }
 ```
 
-### 场景 3: 消费者处理消息
+### 3.2 消费者实现
 
 ```go
-// 在服务启动时设置消费者
-func (s *NotificationService) StartConsuming(ctx context.Context) error {
-    // 定义消息处理逻辑
-    handler := func(ctx context.Context, msg *mq.Message) error {
-        // trace_id 已被自动从消息头提取并注入到 ctx 中
-        logger := clog.WithContext(ctx)
-        logger.Info("收到新用户注册事件", clog.String("key", string(msg.Key)))
-        
-        var user User
-        if err := json.Unmarshal(msg.Value, &user); err != nil {
-            logger.Error("反序列化用户事件失败", clog.Err(err))
-            // 返回错误，偏移量不会被提交，消息后续会重试
-            return err
-        }
+type kafkaConsumer struct {
+    consumer   sarama.ConsumerGroup
+    handler    MessageHandler
+    config     *Config
+    groupID    string
+    logger     clog.Logger
+    metrics    metrics.Provider
+    stats      *ConsumerStats
+    statsMu    sync.RWMutex
+}
 
-        // 发送欢迎邮件
-        if err := s.sendWelcomeEmail(ctx, &user); err != nil {
-            logger.Error("发送欢迎邮件失败", clog.Err(err), clog.String("user_id", user.ID))
-            // 返回错误，偏移量不会被提交，消息后续会重试
-            return err
+type consumerHandler struct {
+    handler MessageHandler
+    logger  clog.Logger
+    stats   *ConsumerStats
+}
+
+func (h *consumerHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+    for {
+        select {
+        case msg, ok := <-claim.Messages():
+            if !ok {
+                return nil
+            }
+            
+            startTime := time.Now()
+            
+            // 构造消息对象
+            message := &Message{
+                Topic:   msg.Topic,
+                Key:     msg.Key,
+                Value:   msg.Value,
+                Headers: convertKafkaHeaders(msg.Headers),
+                Time:    msg.Timestamp,
+            }
+            
+            // 从消息头提取 trace_id
+            ctx := context.Background()
+            if traceID := getTraceIDFromHeaders(msg.Headers); traceID != "" {
+                ctx = clog.WithTraceID(ctx, traceID)
+            }
+            
+            // 处理消息
+            err := h.handler(ctx, message)
+            
+            // 更新统计信息
+            processTime := time.Since(startTime)
+            h.stats.mu.Lock()
+            h.stats.MessagesConsumed++
+            h.stats.BytesConsumed += int64(len(msg.Value))
+            h.stats.AverageProcessTime = time.Duration(
+                (int64(h.stats.AverageProcessTime)*(h.stats.MessagesConsumed-1) + int64(processTime)) /
+                h.stats.MessagesConsumed,
+            )
+            
+            if err != nil {
+                h.stats.ProcessingErrors++
+            }
+            h.stats.mu.Unlock()
+            
+            // 手动提交偏移量（如果配置为手动提交）
+            if err == nil {
+                session.MarkMessage(msg, "")
+            }
+            
+        case <-session.Context().Done():
+            return nil
         }
-        
-        logger.Info("成功处理用户注册事件", clog.String("user_id", user.ID))
-        // 返回 nil，偏移量将被自动提交
-        return nil
     }
+}
+```
 
-    // 启动订阅（此方法会阻塞）
-    topics := []string{"gochat.user-events", "gochat.message-events"}
+### 3.3 连接管理和配置更新
+
+```go
+func (p *kafkaProducer) setupConfig(config *Config) *sarama.Config {
+    saramaConfig := sarama.NewConfig()
+    
+    // 生产者配置
+    saramaConfig.Producer.RequiredAcks = sarama.RequiredAcks(config.ProducerConfig.Acks)
+    saramaConfig.Producer.Retry.Max = config.ProducerConfig.RetryMax
+    saramaConfig.Producer.Retry.Backoff = 100 * time.Millisecond
+    saramaConfig.Producer.Flush.MaxMessages = config.ProducerConfig.BatchSize
+    saramaConfig.Producer.Flush.Frequency = time.Duration(config.ProducerConfig.LingerMs) * time.Millisecond
+    saramaConfig.Producer.Compression = sarama.CompressionCodec(config.ProducerConfig.Compression)
+    
+    // 消费者配置
+    saramaConfig.Consumer.Offsets.Initial = sarama.OffsetNewest
+    if config.ConsumerConfig.AutoOffsetReset == "earliest" {
+        saramaConfig.Consumer.Offsets.Initial = sarama.OffsetOldest
+    }
+    saramaConfig.Consumer.Offsets.AutoCommit.Enable = config.ConsumerConfig.EnableAutoCommit
+    saramaConfig.Consumer.Offsets.AutoCommit.Interval = time.Duration(config.ConsumerConfig.AutoCommitIntervalMs) * time.Millisecond
+    saramaConfig.Consumer.Group.Session.Timeout = time.Duration(config.ConsumerConfig.SessionTimeoutMs) * time.Millisecond
+    saramaConfig.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
+    
+    // 安全配置
+    if config.SecurityProtocol != "PLAINTEXT" {
+        saramaConfig.Net.SASL.Enable = true
+        saramaConfig.Net.SASL.Mechanism = sarama.SASLMechanism(config.SASLMechanism)
+        saramaConfig.Net.SASL.User = config.SASLUsername
+        saramaConfig.Net.SASL.Password = config.SASLPassword
+    }
+    
+    return saramaConfig
+}
+
+func (p *kafkaProducer) watchConfigChanges(ctx context.Context) {
+    if p.coord == nil {
+        return
+    }
+    
+    configPath := "/config/mq/"
+    watcher, err := p.coord.Config().WatchPrefix(ctx, configPath, &p.config)
+    if err != nil {
+        p.logger.Error("监听 MQ 配置失败", clog.Err(err))
+        return
+    }
+    
     go func() {
-        if err := s.consumer.Subscribe(ctx, topics, handler); err != nil {
-            // Subscribe 只有在不可恢复的错误下才会返回 error
-            clog.Fatal("消费者订阅失败", clog.Err(err))
+        for range watcher.Changes() {
+            p.updateConfig()
         }
     }()
+}
+```
+
+### 3.4 监控和统计
+
+```go
+func (p *kafkaProducer) startMetricsCollection(ctx context.Context) {
+    ticker := time.NewTicker(30 * time.Second)
+    defer ticker.Stop()
+    
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            p.reportMetrics()
+        }
+    }
+}
+
+func (p *kafkaProducer) reportMetrics() {
+    p.statsMu.RLock()
+    defer p.statsMu.RUnlock()
+    
+    if p.metrics != nil {
+        p.metrics.Gauge("mq.producer.messages_sent", float64(p.stats.MessagesSent))
+        p.metrics.Gauge("mq.producer.bytes_sent", float64(p.stats.BytesSent))
+        p.metrics.Gauge("mq.producer.send_errors", float64(p.stats.SendErrors))
+        p.metrics.Gauge("mq.producer.retry_count", float64(p.stats.RetryCount))
+        p.metrics.Gauge("mq.producer.average_latency_ms", float64(p.stats.AverageLatency.Milliseconds()))
+        p.metrics.Gauge("mq.producer.queue_size", float64(p.stats.CurrentQueueSize))
+    }
+}
+```
+
+## 4. 标准用法示例
+
+### 4.1 基础初始化
+
+```go
+func main() {
+    ctx := context.Background()
+    
+    // 1. 初始化 MQ 组件
+    config := mq.GetDefaultConfig("production")
+    config.Brokers = []string{"kafka1:9092", "kafka2:9092", "kafka3:9092"}
+    config.SecurityProtocol = "SASL_SSL"
+    
+    // 生产者配置
+    config.ProducerConfig = &mq.ProducerConfig{
+        Acks:        -1,   // 等待所有副本确认
+        RetryMax:    10,   // 最大重试次数
+        BatchSize:   65536, // 批处理大小
+        LingerMs:    10,   // 延迟发送时间
+        Compression: 2,    // 使用 gzip 压缩
+    }
+    
+    // 消费者配置
+    config.ConsumerConfig = &mq.ConsumerConfig{
+        AutoOffsetReset:      "earliest",
+        EnableAutoCommit:     false,
+        AutoCommitIntervalMs: 5000,
+        SessionTimeoutMs:     30000,
+        MaxPollRecords:       500,
+        MaxPollIntervalMs:    300000,
+    }
+    
+    // 创建生产者
+    producer, err := mq.NewProducer(ctx, config,
+        mq.WithLogger(clog.Namespace("mq-producer")),
+        mq.WithCoordProvider(coordProvider),
+        mq.WithMetricsProvider(metricsProvider),
+    )
+    if err != nil {
+        log.Fatal("创建 MQ 生产者失败:", err)
+    }
+    defer producer.Close()
+    
+    // 创建消费者
+    consumer, err := mq.NewConsumer(ctx, config, "user-service-group",
+        mq.WithLogger(clog.Namespace("mq-consumer")),
+    )
+    if err != nil {
+        log.Fatal("创建 MQ 消费者失败:", err)
+    }
+    defer consumer.Close()
+}
+```
+
+### 4.2 发送消息
+
+```go
+type UserService struct {
+    producer mq.Producer
+}
+
+func (s *UserService) UserRegistered(ctx context.Context, user *User) error {
+    logger := clog.WithContext(ctx)
+    
+    // 构造事件消息
+    event := &UserRegisteredEvent{
+        UserID:    user.ID,
+        Username:  user.Username,
+        Email:     user.Email,
+        Timestamp: time.Now(),
+    }
+    
+    eventData, err := json.Marshal(event)
+    if err != nil {
+        return fmt.Errorf("序列化事件失败: %w", err)
+    }
+    
+    message := &mq.Message{
+        Topic: "user-events.registered",
+        Key:   []byte(user.ID),
+        Value: eventData,
+        Headers: map[string][]byte{
+            "Event-Type": []byte("UserRegistered"),
+            "Version":    []byte("1.0"),
+        },
+    }
+    
+    // 异步发送消息
+    err = s.producer.Send(ctx, message, func(ack *mq.MessageAck) {
+        if ack.Error != nil {
+            logger.Error("发送用户注册事件失败", 
+                clog.String("user_id", user.ID),
+                clog.Err(ack.Error))
+        } else {
+            logger.Info("用户注册事件发送成功", 
+                clog.String("user_id", user.ID),
+                clog.Int32("partition", ack.Partition),
+                clog.Int64("offset", ack.Offset))
+        }
+    })
+    
+    if err != nil {
+        return fmt.Errorf("发送消息失败: %w", err)
+    }
     
     return nil
 }
 ```
 
-## 4. 设计注记
+### 4.3 接收消息
 
-### 4.1 GetDefaultConfig 默认值说明
-
-`GetDefaultConfig` 根据环境返回优化的默认配置：
-
-**开发环境 (development)**:
 ```go
-&Config{
-    Brokers:          []string{"localhost:9092"},
-    SecurityProtocol: "PLAINTEXT",
-    ProducerConfig: &ProducerConfig{
-        Acks:      1,        // 适中的确认级别
-        RetryMax:  3,        // 较少重试次数
-        BatchSize: 16384,    // 较小批处理大小
-        LingerMs:  5,        // 较短延迟时间
-    },
-    ConsumerConfig: &ConsumerConfig{
-        AutoOffsetReset:      "latest",
-        EnableAutoCommit:     true,
-        AutoCommitIntervalMs: 1000,
-        SessionTimeoutMs:     10000,
-    },
+type NotificationService struct {
+    consumer mq.Consumer
+}
+
+func (s *NotificationService) Start(ctx context.Context) error {
+    logger := clog.WithContext(ctx)
+    
+    // 订阅用户事件主题
+    topics := []string{
+        "user-events.registered",
+        "user-events.updated",
+        "user-events.deleted",
+    }
+    
+    handler := func(ctx context.Context, msg *mq.Message) error {
+        // 处理消息
+        return s.handleUserEvent(ctx, msg)
+    }
+    
+    // 启动消费者
+    if err := s.consumer.Subscribe(ctx, topics, handler); err != nil {
+        return fmt.Errorf("订阅主题失败: %w", err)
+    }
+    
+    logger.Info("消息消费者启动成功", clog.Strings("topics", topics))
+    return nil
+}
+
+func (s *NotificationService) handleUserEvent(ctx context.Context, msg *mq.Message) error {
+    logger := clog.WithContext(ctx)
+    
+    // 根据主题处理不同事件
+    switch msg.Topic {
+    case "user-events.registered":
+        return s.handleUserRegistered(ctx, msg)
+    case "user-events.updated":
+        return s.handleUserUpdated(ctx, msg)
+    case "user-events.deleted":
+        return s.handleUserDeleted(ctx, msg)
+    default:
+        logger.Warn("未知的用户事件类型", clog.String("topic", msg.Topic))
+        return nil
+    }
+}
+
+func (s *NotificationService) handleUserRegistered(ctx context.Context, msg *mq.Message) error {
+    logger := clog.WithContext(ctx)
+    
+    var event UserRegisteredEvent
+    if err := json.Unmarshal(msg.Value, &event); err != nil {
+        logger.Error("解析用户注册事件失败", clog.Err(err))
+        return err
+    }
+    
+    logger.Info("处理用户注册事件", 
+        clog.String("user_id", event.UserID),
+        clog.String("username", event.Username))
+    
+    // 发送欢迎邮件
+    if err := s.sendWelcomeEmail(ctx, event); err != nil {
+        logger.Error("发送欢迎邮件失败", 
+            clog.String("user_id", event.UserID),
+            clog.Err(err))
+        return err
+    }
+    
+    // 提交偏移量
+    if err := s.consumer.Commit(ctx); err != nil {
+        logger.Error("提交偏移量失败", clog.Err(err))
+        return err
+    }
+    
+    return nil
 }
 ```
 
-**生产环境 (production)**:
+### 4.4 批量发送
+
 ```go
-&Config{
-    Brokers:          []string{"kafka1:9092", "kafka2:9092", "kafka3:9092"},
-    SecurityProtocol: "SASL_SSL",
-    ProducerConfig: &ProducerConfig{
-        Acks:      -1,       // 最强确认级别(all)
-        RetryMax:  10,       // 更多重试次数
-        BatchSize: 65536,    // 较大批处理大小
-        LingerMs:  10,       // 适中延迟时间
-    },
-    ConsumerConfig: &ConsumerConfig{
-        AutoOffsetReset:      "earliest",
-        EnableAutoCommit:     true,
-        AutoCommitIntervalMs: 5000,
-        SessionTimeoutMs:     30000,
-    },
+func (s *MessageService) BatchSendMessages(ctx context.Context, messages []*Message) error {
+    logger := clog.WithContext(ctx)
+    
+    // 批量发送消息
+    err := s.producer.SendBatch(ctx, messages, func(acks []*mq.MessageAck) {
+        successCount := 0
+        errorCount := 0
+        
+        for _, ack := range acks {
+            if ack.Error != nil {
+                errorCount++
+                logger.Error("消息发送失败", 
+                    clog.String("topic", ack.Topic),
+                    clog.Err(ack.Error))
+            } else {
+                successCount++
+            }
+        }
+        
+        logger.Info("批量消息发送完成", 
+            clog.Int("total", len(messages)),
+            clog.Int("success", successCount),
+            clog.Int("errors", errorCount))
+    })
+    
+    if err != nil {
+        return fmt.Errorf("批量发送消息失败: %w", err)
+    }
+    
+    return nil
 }
 ```
 
-用户仍需要根据实际部署环境覆盖 `Brokers` 配置，并根据安全需求设置认证信息。
+## 5. 高级特性
 
-### 4.2 Trace ID 自动传播机制
+### 5.1 事务消息
 
-`mq` 组件实现了分布式追踪的无缝集成：
-
-**发送端**: 
-- `Send/SendSync` 方法自动从 `context.Context` 中提取 `trace_id`
-- 将 `trace_id` 作为消息头(`X-Trace-ID`)自动添加到 Kafka 消息中
-
-**接收端**:
-- `Subscribe` 回调函数接收的 `context.Context` 已自动包含从消息头提取的 `trace_id`
-- 业务代码使用 `clog.WithContext(ctx)` 即可获得带追踪的日志器
-
-这种设计确保了跨服务的调用链完整性，无需业务代码手动处理。
-
-### 4.3 错误处理和重试策略
-
-**消费者错误处理**:
-- 回调函数返回 `error` 不会中断消费流程
-- 偏移量仍会被自动提交，避免重复消费同一消息
-- 建议在业务层面实现重试逻辑和死信队列
-
-**生产者错误处理**:
-- 异步发送通过回调函数处理错误
-- 同步发送直接返回错误
-- 内置重试机制由 `ProducerConfig.RetryMax` 控制
-
-### 4.4 Topic 和 GroupID 的设计原则
-
-**Topic 命名规范**:
-- GoChat 项目采用 `gochat.{module}.{type}` 格式
-- **核心消息流**: 
-  - `gochat.messages.upstream` (客户端 → im-logic)
-  - `gochat.messages.downstream.{instanceID}` (im-logic → im-gateway)
-  - `gochat.tasks.fanout` (超大群扇出任务)
-- **领域事件**:
-  - `gochat.user-events` (用户上线、下线、资料更新)
-  - `gochat.message-events` (消息已读、撤回)
-  - `gochat.notifications` (系统通知)
-- **业务代码直接使用预定义常量**，参考 `api/kafka/message.go`
-
-**GroupID 命名规范**:
-- 采用 `{service}.{purpose}.group` 格式
-- **核心服务组**:
-  - `logic.upstream.group` (im-logic 消费上行消息)
-  - `gateway.downstream.group.{instanceID}` (im-gateway 消费下行消息)
-  - `task.fanout.group` (im-task 处理扇出任务)
-- **领域事件消费组**:
-  - `analytics.events.group` (数据分析服务)
-  - `notification.events.group` (通知服务)
-
-**管理操作边界**:
-- `mq` 组件**不提供** Topic 创建、删除等管理功能
-- 提供**独立的管理脚本**处理基础设施初始化
-- Topic 管理由运维脚本统一处理，确保环境一致性
-
-### 4.5 消息路由机制详解
-
-**Topic 路由**:
 ```go
-msg := &mq.Message{
-    Topic: "user.events.registered", // 直接指定目标 Topic
-    Key:   []byte(user.ID),          // 用于分区路由，相同 key 到同一分区
-    Value: eventData,                // 消息内容
-    Headers: map[string][]byte{      // 元数据，不影响路由
-        "X-Trace-ID": []byte(traceID),
-        "X-Source":   []byte("user-service"),
-    },
+func (s *OrderService) CreateOrderWithTransaction(ctx context.Context, order *Order) error {
+    // 在数据库事务中发送消息
+    err := s.db.Transaction(ctx, func(tx *gorm.DB) error {
+        // 1. 创建订单
+        if err := tx.Create(order).Error; err != nil {
+            return fmt.Errorf("创建订单失败: %w", err)
+        }
+        
+        // 2. 发送订单创建事件
+        event := &OrderCreatedEvent{
+            OrderID:  order.ID,
+            UserID:   order.UserID,
+            Amount:   order.Amount,
+            Status:   order.Status,
+        }
+        
+        eventData, _ := json.Marshal(event)
+        message := &mq.Message{
+            Topic: "order-events.created",
+            Key:   []byte(order.ID),
+            Value: eventData,
+        }
+        
+        // 使用同步发送确保消息发送成功
+        ack, err := s.producer.SendSync(ctx, message)
+        if err != nil {
+            return fmt.Errorf("发送订单事件失败: %w", err)
+        }
+        
+        // 记录消息偏移量
+        if err := tx.Create(&MessageLog{
+            OrderID:   order.ID,
+            Topic:     ack.Topic,
+            Partition: ack.Partition,
+            Offset:    ack.Offset,
+            Status:    "sent",
+        }).Error; err != nil {
+            return fmt.Errorf("记录消息日志失败: %w", err)
+        }
+        
+        return nil
+    })
+    
+    return err
 }
 ```
 
-**分区路由逻辑**:
-- 有 Key：`hash(Key) % partition_count` 
-- 无 Key：轮询或随机分配到各分区
-- **相同 Key 保证顺序性**：同一用户的事件按顺序处理
+### 5.2 消息重试和死信队列
 
-**消费者组负载均衡**:
 ```go
-// 同一组的多个实例，分摊处理 Topic 的各个分区
-consumer1, _ := mq.NewConsumer(ctx, config, "notification-service-group") // 实例1
-consumer2, _ := mq.NewConsumer(ctx, config, "notification-service-group") // 实例2
+func (s *PaymentService) handlePaymentMessage(ctx context.Context, msg *mq.Message) error {
+    logger := clog.WithContext(ctx)
+    
+    var payment Payment
+    if err := json.Unmarshal(msg.Value, &payment); err != nil {
+        return fmt.Errorf("解析支付消息失败: %w", err)
+    }
+    
+    // 获取重试次数
+    retryCount := getRetryCountFromHeaders(msg.Headers)
+    
+    // 处理支付
+    err := s.processPayment(ctx, &payment)
+    if err != nil {
+        logger.Error("支付处理失败", 
+            clog.String("payment_id", payment.ID),
+            clog.Int("retry_count", retryCount),
+            clog.Err(err))
+        
+        // 如果重试次数超过限制，发送到死信队列
+        if retryCount >= 3 {
+            return s.sendToDeadLetterQueue(ctx, msg, err)
+        }
+        
+        // 增加重试次数并重新发送
+        return s.retryMessage(ctx, msg, retryCount+1)
+    }
+    
+    logger.Info("支付处理成功", clog.String("payment_id", payment.ID))
+    return nil
+}
 
-// 不同组，都会收到所有消息（广播效果）
-notificationConsumer, _ := mq.NewConsumer(ctx, config, "notification-service-group")
-analyticsConsumer, _   := mq.NewConsumer(ctx, config, "analytics-service-group")
+func (s *PaymentService) retryMessage(ctx context.Context, msg *mq.Message, retryCount int) error {
+    // 更新重试次数
+    if msg.Headers == nil {
+        msg.Headers = make(map[string][]byte)
+    }
+    msg.Headers["Retry-Count"] = []byte(strconv.Itoa(retryCount))
+    
+    // 延迟重试
+    time.AfterFunc(time.Duration(retryCount)*time.Second, func() {
+        ack, err := s.producer.SendSync(ctx, msg)
+        if err != nil {
+            s.logger.Error("重试消息发送失败", clog.Err(err))
+        } else {
+            s.logger.Info("重试消息发送成功", 
+                clog.String("topic", ack.Topic),
+                clog.Int32("partition", ack.Partition))
+        }
+    })
+    
+    return nil
+}
 ```
 
-### 4.6 与其他组件的集成
+### 5.3 消费者组管理
 
-**与 clog 集成**:
-- 通过 `WithLogger` 选项注入日志器
-- 自动记录连接、发送、消费等关键事件
-- 支持 trace_id 在消息传递过程中的自动传播
+```go
+func (s *ConsumerManager) Rebalance(ctx context.Context) error {
+    // 获取当前分区分配
+    assignments, err := s.getCurrentAssignments(ctx)
+    if err != nil {
+        return fmt.Errorf("获取分区分配失败: %w", err)
+    }
+    
+    // 计算新的分区分配
+    newAssignments := s.calculateOptimalAssignments(assignments)
+    
+    // 应用新的分配
+    if err := s.applyAssignments(ctx, newAssignments); err != nil {
+        return fmt.Errorf("应用分区分配失败: %w", err)
+    }
+    
+    // 更新消费者组状态
+    s.updateConsumerGroupStatus(newAssignments)
+    
+    return nil
+}
 
-**与 coord 集成**:
-- 通过 `WithCoordProvider` 选项支持动态配置
-- 可从配置中心获取 Kafka 集群信息和认证配置
-- 支持运行时配置热更新（如调整生产者批处理大小等）
+func (s *ConsumerManager) monitorConsumerLag(ctx context.Context) {
+    ticker := time.NewTicker(30 * time.Second)
+    defer ticker.Stop()
+    
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            s.checkConsumerLag(ctx)
+        }
+    }
+}
 
-## 5. 常见问题 (FAQ)
+func (s *ConsumerManager) checkConsumerLag(ctx context.Context) {
+    // 获取所有消费者组
+    groups, err := s.getConsumerGroups(ctx)
+    if err != nil {
+        s.logger.Error("获取消费者组失败", clog.Err(err))
+        return
+    }
+    
+    // 检查每个组的消费延迟
+    for _, group := range groups {
+        lag, err := s.getConsumerLag(ctx, group)
+        if err != nil {
+            s.logger.Error("获取消费延迟失败", 
+                clog.String("group", group),
+                clog.Err(err))
+            continue
+        }
+        
+        // 如果延迟超过阈值，发出告警
+        if lag > s.config.LagThreshold {
+            s.logger.Warn("消费延迟过高", 
+                clog.String("group", group),
+                clog.Int64("lag", lag))
+            
+            // 触发自动扩容
+            s.triggerAutoScaling(ctx, group, lag)
+        }
+    }
+}
+```
 
-### Q1: Topic 需要预先创建吗？
-**A**: 
-- **开发环境**: 可配置 Kafka 自动创建 Topic，方便开发测试
-- **生产环境**: 强烈建议预先创建 Topic，并设置合适的分区数和副本数
-- **GoChat 管理**: 使用 `deployment/scripts/kafka-admin.sh create-all` 创建所有必要的 Topics
-- **mq 组件职责**: 只负责消息的发送和接收，不提供 Topic 管理功能
+## 6. 最佳实践
 
-### Q2: GroupID 可以随意命名吗？
-**A**: 
-- **不建议随意命名**，应遵循 `{service}.{purpose}.group` 规范
-- **GoChat 规范**: 
-  - `logic.upstream.group` (im-logic 消费上行消息)
-  - `gateway.downstream.group.{instanceID}` (im-gateway 消费下行消息)
-  - `task.fanout.group` (im-task 处理扇出任务)
-- **相同 GroupID**: 实现负载均衡，多个实例分摊处理消息
-- **不同 GroupID**: 实现广播消费，每个组都收到所有消息
+### 6.1 消息设计
 
-### Q3: 如何管理 Kafka Topics 和 Consumer Groups？
-**A**:
-- **管理脚本**: 使用 `deployment/scripts/kafka-admin.sh`
-- **常用命令**:
-  ```bash
-  # 创建所有 Topics
-  ./kafka-admin.sh create-all
-  
-  # 列出所有 Topics
-  ./kafka-admin.sh list
-  
-  # 查看 Consumer Groups
-  ./kafka-admin.sh list-groups
-  
-  # 监控 Topics 状态
-  ./kafka-admin.sh monitor
-  ```
-- **初始化**: 使用 `deployment/scripts/init-kafka.sh` 一键初始化
+- **消息格式**: 使用 JSON 或 Protobuf 进行序列化
+- **消息大小**: 控制单个消息大小，避免过大消息
+- **消息版本**: 在消息头中包含版本信息，便于兼容性处理
+- **消息标识**: 使用有意义的键值，便于分区路由
 
-### Q3: 如何保证消息的顺序性？
-**A**:
-- **设置 Message.Key**: 相同 Key 的消息会路由到同一分区
-- **单分区消费**: 同一分区内的消息保证 FIFO 顺序
-- **示例**: 用户相关事件使用 `user.ID` 作为 Key
+### 6.2 性能优化
 
-### Q4: 消息发送失败怎么办？
-**A**:
-- **异步发送**: 通过回调函数处理错误，记录日志或发送到死信队列
-- **同步发送**: 直接返回错误，业务代码决定重试策略
-- **内置重试**: 由 `ProducerConfig.RetryMax` 控制自动重试
+- **批量发送**: 使用批量发送减少网络开销
+- **压缩**: 启用消息压缩减少传输数据量
+- **连接池**: 合理配置连接池大小
+- **异步处理**: 使用异步发送提高吞吐量
 
-### Q5: 消费者处理失败的消息会重复消费吗？
-**A**:
-- **不会重复消费**: 偏移量会自动提交，即使处理失败
-- **错误处理**: 建议在业务层实现重试逻辑
-- **死信队列**: 对于永久失败的消息，发送到专门的错误处理 Topic
+### 6.3 可靠性保证
+
+- **确认级别**: 根据业务需求选择合适的确认级别
+- **重试机制**: 实现合理的重试策略
+- **死信队列**: 处理无法正常消费的消息
+- **监控告警**: 监控消息队列的关键指标
+
+### 6.4 运维管理
+
+- **主题管理**: 合理设计主题数量和分区数
+- **消费者组**: 合理设置消费者组，避免重复消费
+- **配置管理**: 使用配置中心管理 Kafka 配置
+- **监控指标**: 监控生产者、消费者的关键指标
+
+---
+
+*遵循这些指南可以确保消息队列组件的高质量实现和稳定运行。*
