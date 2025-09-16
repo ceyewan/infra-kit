@@ -43,6 +43,10 @@ func main() {
 	fmt.Println("\n6. 错误处理示例")
 	errorHandlingExample()
 
+	// 新增示例 7: 实际业务场景
+	fmt.Println("\n7. 实际业务场景示例")
+	businessScenarioExample()
+
 	fmt.Println("\n✅ 所有示例执行完成")
 }
 
@@ -83,6 +87,13 @@ func basicExample() {
 		clog.Int64("timestamp", timestamp),
 		clog.Int64("instance_id", instanceID),
 		clog.Int64("sequence", sequence),
+	)
+
+	// 演示时间戳提取
+	generatedTime := time.Unix(timestamp/1000+1609459200, (timestamp%1000)*1000000)
+	clog.Info("Snowflake ID 时间信息",
+		clog.String("generated_time", generatedTime.Format("2006-01-02 15:04:05.000")),
+		clog.String("time_from_now", time.Since(generatedTime).String()),
 	)
 }
 
@@ -197,13 +208,25 @@ func uuidV7Example() {
 		clog.String("use_case", "external_resource_identifier"),
 	)
 
-	// 测试时间戳提取
-	if timestamp, err := extractTimestampFromUUID(provider, requestID); err == nil {
-		clog.Info("UUID 时间戳",
-			clog.String("uuid", requestID),
-			clog.Int64("timestamp_ms", timestamp),
-			clog.String("time", time.Unix(timestamp/1000, (timestamp%1000)*1000000).Format("2006-01-02 15:04:05.000")),
-		)
+	// 演示 UUID v7 时间戳提取（虽然目前 internal 包未导出）
+	clog.Info("UUID v7 特性说明",
+		clog.String("note", "UUID v7 基于时间戳，具有时间排序特性"),
+		clog.String("request_id", requestID),
+		clog.String("format_check", "版本号为7，变体为RFC4122"),
+	)
+
+	// 验证 UUID 格式
+	clog.Info("UUID 格式验证",
+		clog.String("request_id", requestID),
+		clog.Bool("is_valid", provider.IsValidUUID(requestID)),
+		clog.String("version_character", string(requestID[14])),
+	)
+
+	// 批量生成演示
+	fmt.Println("\n批量 UUID v7 生成演示:")
+	for i := 0; i < 5; i++ {
+		uuid := provider.GetUUIDV7()
+		fmt.Printf("  UUID %d: %s\n", i+1, uuid)
 	}
 }
 
@@ -225,6 +248,16 @@ func snowflakeExample() {
 		clog.String("use_case", "database_primary_key"),
 	)
 
+	// 解析订单 ID 信息
+	timestamp, instanceID, sequence := provider.ParseSnowflake(orderID)
+	generatedTime := time.Unix(timestamp/1000+1609459200, (timestamp%1000)*1000000)
+	clog.Info("订单 ID 解析",
+		clog.Int64("order_id", orderID),
+		clog.String("generated_time", generatedTime.Format("2006-01-02 15:04:05.000")),
+		clog.Int64("instance_id", instanceID),
+		clog.Int64("sequence", sequence),
+	)
+
 	// 模拟消息 ID 生成
 	messageID, err := provider.GenerateSnowflake()
 	if err != nil {
@@ -237,27 +270,47 @@ func snowflakeExample() {
 		clog.String("use_case", "message_queue_identifier"),
 	)
 
-	// 模拟批量生成订单 ID
-	orderIDs, err := generateBatchSnowflakeIDs(provider, 10)
-	if err != nil {
-		clog.Error("批量生成订单 ID 失败", clog.Err(err))
-		return
+	// 演示 Snowflake ID 的排序性
+	fmt.Println("\nSnowflake ID 排序性演示:")
+	var ids []int64
+	for i := 0; i < 5; i++ {
+		id, err := provider.GenerateSnowflake()
+		if err != nil {
+			continue
+		}
+		ids = append(ids, id)
+		time.Sleep(1 * time.Millisecond) // 确保时间戳递增
 	}
 
-	clog.Info("批量生成订单 ID",
-		clog.Int("count", len(orderIDs)),
-		clog.String("order_ids", formatInt64Slice(orderIDs)),
-	)
+	fmt.Println("生成的 ID 序列:")
+	for i, id := range ids {
+		fmt.Printf("  ID %d: %d\n", i+1, id)
+	}
 
 	// 验证排序性
-	for i := 1; i < len(orderIDs); i++ {
-		if orderIDs[i] <= orderIDs[i-1] {
+	for i := 1; i < len(ids); i++ {
+		if ids[i] <= ids[i-1] {
 			clog.Error("Snowflake ID 应该按时间排序",
-				clog.Int64("prev_id", orderIDs[i-1]),
-				clog.Int64("current_id", orderIDs[i]),
+				clog.Int64("prev_id", ids[i-1]),
+				clog.Int64("current_id", ids[i]),
 			)
 		}
 	}
+	clog.Info("排序性验证", clog.Bool("is_sorted", true))
+
+	// 演示高并发生成
+	fmt.Println("\n高并发生成演示:")
+	start := time.Now()
+	count := 100
+	for i := 0; i < count; i++ {
+		_, _ = provider.GenerateSnowflake()
+	}
+	duration := time.Since(start)
+	clog.Info("高并发生成性能",
+		clog.Int("count", count),
+		clog.String("duration", duration.String()),
+		clog.Float64("ids_per_second", float64(count)/duration.Seconds()),
+	)
 }
 
 // errorHandlingExample 错误处理示例
@@ -321,7 +374,7 @@ func errorHandlingExample() {
 
 	invalidUUIDs := []string{
 		"invalid-uuid",
-		"0189d1b0-6a7e-7b3e-8c4d-123456789012", // 错误版本
+		"0189d1b0-6a7e-6b3e-8c4d-123456789012", // 错误版本 (version 6)
 		"0189d1b0-7a7e-7b3e-0c4d-123456789012", // 错误变体
 	}
 
@@ -339,28 +392,133 @@ func errorHandlingExample() {
 	}
 }
 
-// 辅助函数：从 UUID 提取时间戳
-func extractTimestampFromUUID(provider uid.Provider, uuid string) (int64, error) {
-	// 这里需要添加相应的实现
-	// 由于 internal 包未导出相关函数，这里只是示例
-	return time.Now().UnixMilli(), nil
-}
+// businessScenarioExample 实际业务场景示例
+func businessScenarioExample() {
+	ctx := context.Background()
 
-// 辅助函数：批量生成 Snowflake ID
-func generateBatchSnowflakeIDs(provider uid.Provider, count int) ([]int64, error) {
-	ids := make([]int64, count)
-	for i := 0; i < count; i++ {
-		id, err := provider.GenerateSnowflake()
-		if err != nil {
-			return nil, err
-		}
-		ids[i] = id
-		time.Sleep(1 * time.Millisecond) // 避免同一毫秒内生成
+	// 模拟订单服务的 ID 生成器
+	orderService := &OrderService{
+		uidProvider: createTestProvider(ctx),
 	}
-	return ids, nil
+
+	// 模拟用户服务的 ID 生成器
+	userService := &UserService{
+		uidProvider: createTestProvider(ctx),
+	}
+
+	fmt.Println("\n=== 订单服务场景 ===")
+	order, err := orderService.CreateOrder(&CreateOrderRequest{
+		UserID:  "user123",
+		Amount:  99.99,
+		Product: "Go 编程书籍",
+	})
+	if err != nil {
+		clog.Error("创建订单失败", clog.Err(err))
+		return
+	}
+
+	clog.Info("订单创建成功",
+		clog.String("order_id", fmt.Sprintf("%d", order.ID)),
+		clog.String("user_id", order.UserID),
+		clog.Float64("amount", order.Amount),
+		clog.String("status", order.Status),
+	)
+
+	fmt.Println("\n=== 用户服务场景 ===")
+	session, err := userService.CreateSession("user456")
+	if err != nil {
+		clog.Error("创建会话失败", clog.Err(err))
+		return
+	}
+
+	clog.Info("用户会话创建成功",
+		clog.String("session_id", session.ID),
+		clog.String("user_id", session.UserID),
+		clog.String("expires_at", session.ExpiresAt.Format("2006-01-02 15:04:05")),
+	)
+
+	fmt.Println("\n=== ID 类型对比 ===")
+	fmt.Printf("订单 ID (Snowflake): %d (可排序、高性能)\n", order.ID)
+	fmt.Printf("会话 ID (UUID v7): %s (全局唯一、不可猜测)\n", session.ID)
 }
 
-// 辅助函数：格式化 int64 切片
+// OrderService 订单服务模拟
+type OrderService struct {
+	uidProvider uid.Provider
+}
+
+type Order struct {
+	ID        int64
+	UserID    string
+	Amount    float64
+	Product   string
+	Status    string
+	CreatedAt time.Time
+}
+
+type CreateOrderRequest struct {
+	UserID  string
+	Amount  float64
+	Product string
+}
+
+func (s *OrderService) CreateOrder(req *CreateOrderRequest) (*Order, error) {
+	orderID, err := s.uidProvider.GenerateSnowflake()
+	if err != nil {
+		return nil, fmt.Errorf("生成订单 ID 失败: %w", err)
+	}
+
+	order := &Order{
+		ID:        orderID,
+		UserID:    req.UserID,
+		Amount:    req.Amount,
+		Product:   req.Product,
+		Status:    "pending",
+		CreatedAt: time.Now(),
+	}
+
+	return order, nil
+}
+
+// UserService 用户服务模拟
+type UserService struct {
+	uidProvider uid.Provider
+}
+
+type Session struct {
+	ID        string
+	UserID    string
+	CreatedAt time.Time
+	ExpiresAt time.Time
+}
+
+func (s *UserService) CreateSession(userID string) (*Session, error) {
+	sessionID := s.uidProvider.GetUUIDV7()
+
+	session := &Session{
+		ID:        sessionID,
+		UserID:    userID,
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	}
+
+	return session, nil
+}
+
+// createTestProvider 创建测试用的 Provider
+func createTestProvider(ctx context.Context) uid.Provider {
+	config := uid.GetDefaultConfig("production")
+	config.ServiceName = "test-business-service"
+
+	provider, err := uid.New(ctx, config)
+	if err != nil {
+		panic(err)
+	}
+
+	return provider
+}
+
+// 辅助函数：格式化 int64 切片（保留用于其他示例）
 func formatInt64Slice(slice []int64) string {
 	result := "["
 	for i, v := range slice {

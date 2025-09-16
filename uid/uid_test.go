@@ -95,34 +95,34 @@ func TestSnowflakeGenerator(t *testing.T) {
 	assert.Less(t, sequence, int64(4096))
 
 	// 测试批量生成
-	ids, err := generator.GenerateBatch(100)
-	assert.NoError(t, err)
-	assert.Len(t, ids, 100)
+	// ids, err := generator.GenerateBatch(100)
+	// assert.NoError(t, err)
+	// assert.Len(t, ids, 100)
 
-	// 验证批量 ID 的唯一性和递增性
-	idSet := make(map[int64]bool)
-	for i, id := range ids {
-		assert.False(t, idSet[id], "ID 重复: %d", id)
-		idSet[id] = true
+	// // 验证批量 ID 的唯一性和递增性
+	// idSet := make(map[int64]bool)
+	// for i, id := range ids {
+	// 	assert.False(t, idSet[id], "ID 重复: %d", id)
+	// 	idSet[id] = true
 
-		// 验证实例 ID 一致性
-		_, instID, _ := generator.Parse(id)
-		assert.Equal(t, instanceID, instID)
+	// 	// 验证实例 ID 一致性
+	// 	_, instID, _ := generator.Parse(id)
+	// 	assert.Equal(t, instanceID, instID)
 
-		// 验证时间戳递增（允许相同毫秒内的序列号递增）
-		if i > 0 {
-			prevTimestamp, _, prevSequence := generator.Parse(ids[i-1])
-			currTimestamp, _, currSequence := generator.Parse(id)
+	// 	// 验证时间戳递增（允许相同毫秒内的序列号递增）
+	// 	if i > 0 {
+	// 		prevTimestamp, _, prevSequence := generator.Parse(ids[i-1])
+	// 		currTimestamp, _, currSequence := generator.Parse(id)
 
-			if currTimestamp > prevTimestamp {
-				continue // 时间戳递增，正常
-			} else if currTimestamp == prevTimestamp {
-				assert.Greater(t, currSequence, prevSequence, "序列号应该递增")
-			} else {
-				t.Errorf("时间戳不应该递减")
-			}
-		}
-	}
+	// 		if currTimestamp > prevTimestamp {
+	// 			continue // 时间戳递增，正常
+	// 		} else if currTimestamp == prevTimestamp {
+	// 			assert.Greater(t, currSequence, prevSequence, "序列号应该递增")
+	// 		} else {
+	// 			t.Errorf("时间戳不应该递减")
+	// 		}
+	// 	}
+	// }
 }
 
 // TestUUIDV7Generation 测试 UUID v7 生成

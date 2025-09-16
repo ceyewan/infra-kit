@@ -40,6 +40,12 @@ type uidProvider struct {
 	closeOnce  sync.Once
 }
 
+// TODO: 待 coord 组件实现后，添加分布式实例 ID 管理
+// 需要添加以下字段：
+// coord     coord.Provider  // 协调服务依赖
+// leaseID   string          // 租约 ID
+// closeChan chan struct{}   // 关闭信号
+
 // New 创建 uid 组件实例
 // 遵循 infra-kit 的 Provider 模式
 func New(ctx context.Context, config *Config, opts ...Option) (Provider, error) {

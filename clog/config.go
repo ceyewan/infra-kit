@@ -79,7 +79,7 @@ func GetDefaultConfig(env string) *Config {
 			Output:      "stdout",
 			AddSource:   true,
 			EnableColor: true,
-			RootPath:    "gochat",
+			RootPath:    "infra-kit",
 		}
 	case "production":
 		return &Config{
@@ -97,7 +97,7 @@ func GetDefaultConfig(env string) *Config {
 			Output:      "stdout",
 			AddSource:   true,
 			EnableColor: true,
-			RootPath:    "gochat",
+			RootPath:    "infra-kit",
 		}
 	}
 }

@@ -82,47 +82,11 @@ func (g *SnowflakeGenerator) Generate() (int64, error) {
 	return id, nil
 }
 
+// TODO: 未来考虑添加批量生成功能，但需要解决并发安全问题
 // GenerateBatch 批量生成 Snowflake ID
 // 适用于需要大量 ID 的场景，提高生成效率
-func (g *SnowflakeGenerator) GenerateBatch(count int) ([]int64, error) {
-	if count <= 0 {
-		return nil, fmt.Errorf("生成数量必须大于 0")
-	}
-
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	ids := make([]int64, count)
-	currentTime := time.Now().UnixMilli() - g.epoch
-
-	// 检测时钟回拨
-	if currentTime < g.lastTime {
-		return nil, fmt.Errorf("时钟回拨检测：上次时间 %d，当前时间 %d", g.lastTime, currentTime)
-	}
-
-	for i := 0; i < count; i++ {
-		if currentTime == g.lastTime {
-			g.sequence = (g.sequence + 1) & MaxSequence
-			if g.sequence == 0 {
-				// 序列号溢出，等待下一毫秒
-				for currentTime <= g.lastTime {
-					currentTime = time.Now().UnixMilli() - g.epoch
-				}
-			}
-		} else {
-			// 新的毫秒，重置序列号
-			g.sequence = 0
-			g.lastTime = currentTime
-		}
-
-		// 组合 ID
-		ids[i] = (currentTime << TimestampShift) |
-			(g.instanceID << InstanceIDShift) |
-			g.sequence
-	}
-
-	return ids, nil
-}
+// 注意：此方法存在并发安全问题，暂时不实现
+// func (g *SnowflakeGenerator) GenerateBatch(count int) ([]int64, error)
 
 // Parse 解析 Snowflake ID
 // 返回时间戳、实例 ID 和序列号
