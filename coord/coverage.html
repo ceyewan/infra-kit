@@ -1,0 +1,509 @@
+
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+		<title>coord: Go Coverage Report</title>
+		<style>
+			body {
+				background: black;
+				color: rgb(80, 80, 80);
+			}
+			body, pre, #legend span {
+				font-family: Menlo, monospace;
+				font-weight: bold;
+			}
+			#topbar {
+				background: black;
+				position: fixed;
+				top: 0; left: 0; right: 0;
+				height: 42px;
+				border-bottom: 1px solid rgb(80, 80, 80);
+			}
+			#content {
+				margin-top: 50px;
+			}
+			#nav, #legend {
+				float: left;
+				margin-left: 10px;
+			}
+			#legend {
+				margin-top: 12px;
+			}
+			#nav {
+				margin-top: 10px;
+			}
+			#legend span {
+				margin: 0 5px;
+			}
+			.cov0 { color: rgb(192, 0, 0) }
+.cov1 { color: rgb(128, 128, 128) }
+.cov2 { color: rgb(116, 140, 131) }
+.cov3 { color: rgb(104, 152, 134) }
+.cov4 { color: rgb(92, 164, 137) }
+.cov5 { color: rgb(80, 176, 140) }
+.cov6 { color: rgb(68, 188, 143) }
+.cov7 { color: rgb(56, 200, 146) }
+.cov8 { color: rgb(44, 212, 149) }
+.cov9 { color: rgb(32, 224, 152) }
+.cov10 { color: rgb(20, 236, 155) }
+
+		</style>
+	</head>
+	<body>
+		<div id="topbar">
+			<div id="nav">
+				<select id="files">
+				
+				<option value="file0">github.com/ceyewan/infra-kit/coord/config.go (40.0%)</option>
+				
+				<option value="file1">github.com/ceyewan/infra-kit/coord/coord.go (53.5%)</option>
+				
+				<option value="file2">github.com/ceyewan/infra-kit/coord/options.go (40.0%)</option>
+				
+				</select>
+			</div>
+			<div id="legend">
+				<span>not tracked</span>
+			
+				<span class="cov0">no coverage</span>
+				<span class="cov1">low coverage</span>
+				<span class="cov2">*</span>
+				<span class="cov3">*</span>
+				<span class="cov4">*</span>
+				<span class="cov5">*</span>
+				<span class="cov6">*</span>
+				<span class="cov7">*</span>
+				<span class="cov8">*</span>
+				<span class="cov9">*</span>
+				<span class="cov10">high coverage</span>
+			
+			</div>
+		</div>
+		<div id="content">
+		
+		<pre class="file" id="file0" style="display: none">package coord
+
+import "time"
+
+// Config 是 coord 组件的配置结构体
+type Config struct {
+        // Endpoints 是 etcd 集群的地址列表
+        Endpoints []string `json:"endpoints"`
+        
+        // DialTimeout 是连接 etcd 的超时时间
+        DialTimeout time.Duration `json:"dialTimeout"`
+        
+        // KeepAliveTime 是 keepalive 心跳间隔
+        KeepAliveTime time.Duration `json:"keepAliveTime"`
+        
+        // KeepAliveTimeout 是 keepalive 超时时间
+        KeepAliveTimeout time.Duration `json:"keepAliveTimeout"`
+        
+        // Username 是认证用户名，可选
+        Username string `json:"username,omitempty"`
+        
+        // Password 是认证密码，可选
+        Password string `json:"password,omitempty"`
+        
+        // TLS 相关配置，可选
+        TLS *TLSConfig `json:"tls,omitempty"`
+}
+
+// TLSConfig 定义了 TLS 连接配置
+type TLSConfig struct {
+        CertFile string `json:"certFile,omitempty"`
+        KeyFile  string `json:"keyFile,omitempty"`
+        CAFile   string `json:"caFile,omitempty"`
+}
+
+// GetDefaultConfig 返回默认的 coord 配置
+func GetDefaultConfig(env string) *Config <span class="cov8" title="1">{
+        switch env </span>{
+        case "development":<span class="cov0" title="0">
+                return &amp;Config{
+                        Endpoints:       []string{"localhost:2379"},
+                        DialTimeout:     5 * time.Second,
+                        KeepAliveTime:   30 * time.Second,
+                        KeepAliveTimeout: 10 * time.Second,
+                }</span>
+        case "production":<span class="cov0" title="0">
+                return &amp;Config{
+                        Endpoints:       []string{"etcd1:2379", "etcd2:2379", "etcd3:2379"},
+                        DialTimeout:     10 * time.Second,
+                        KeepAliveTime:   30 * time.Second,
+                        KeepAliveTimeout: 10 * time.Second,
+                }</span>
+        default:<span class="cov8" title="1">
+                return &amp;Config{
+                        Endpoints:       []string{"localhost:2379"},
+                        DialTimeout:     5 * time.Second,
+                        KeepAliveTime:   30 * time.Second,
+                        KeepAliveTimeout: 10 * time.Second,
+                }</span>
+        }
+}
+
+// CoordinatorConfig 保持向后兼容的别名
+type CoordinatorConfig = Config
+
+// DefaultConfig 保持向后兼容的函数
+func DefaultConfig() Config <span class="cov0" title="0">{
+        return *GetDefaultConfig("development")
+}</span>
+</pre>
+		
+		<pre class="file" id="file1" style="display: none">package coord
+
+import (
+        "context"
+        "fmt"
+        "sync"
+
+        "github.com/ceyewan/infra-kit/clog"
+        "github.com/ceyewan/infra-kit/coord/allocator"
+        "github.com/ceyewan/infra-kit/coord/config"
+        "github.com/ceyewan/infra-kit/coord/internal/allocatorimpl"
+        "github.com/ceyewan/infra-kit/coord/internal/client"
+        "github.com/ceyewan/infra-kit/coord/internal/configimpl"
+        "github.com/ceyewan/infra-kit/coord/internal/lockimpl"
+        "github.com/ceyewan/infra-kit/coord/internal/registryimpl"
+        "github.com/ceyewan/infra-kit/coord/lock"
+        "github.com/ceyewan/infra-kit/coord/registry"
+)
+
+// Provider 定义协调器的核心接口
+type Provider interface {
+        // Lock 获取分布式锁服务
+        Lock() lock.DistributedLock
+        // Registry 获取服务注册发现服务
+        Registry() registry.ServiceRegistry
+        // Config 获取配置中心服务
+        Config() config.ConfigCenter
+        // InstanceIDAllocator 获取一个服务实例ID分配器
+        // 此方法是可重入的：为同一个 serviceName 多次调用，将返回同一个共享的分配器实例
+        InstanceIDAllocator(serviceName string, maxID int) (allocator.InstanceIDAllocator, error)
+        // Health 检查协调器及其所有服务的健康状态
+        Health(ctx context.Context) error
+        // Close 关闭协调器并释放资源
+        Close() error
+}
+
+// coordinator 主协调器实现
+type coordinator struct {
+        client       *client.EtcdClient
+        lock         lock.DistributedLock
+        registry     registry.ServiceRegistry
+        config       config.ConfigCenter
+        logger       clog.Logger
+        closed       bool
+        mu           sync.RWMutex
+        allocators   map[string]allocator.InstanceIDAllocator // 缓存分配器实例
+        allocatorsMu sync.RWMutex
+}
+
+// New 创建一个新的 coord Provider 实例
+// 这是与 coord 组件交互的唯一入口
+func New(ctx context.Context, config *Config, opts ...Option) (Provider, error) <span class="cov5" title="3">{
+        options := &amp;Options{}
+        for _, opt := range opts </span><span class="cov5" title="3">{
+                opt(options)
+        }</span>
+
+        <span class="cov5" title="3">var logger clog.Logger
+        if options.Logger != nil </span><span class="cov5" title="3">{
+                logger = options.Logger.With(clog.String("component", "coord"))
+        }</span> else<span class="cov0" title="0"> {
+                logger = clog.Namespace("coord")
+        }</span>
+
+        <span class="cov5" title="3">logger.Info("creating new coordinator",
+                clog.Strings("endpoints", config.Endpoints))
+
+        // 1. 验证配置
+        if err := validateConfig(config); err != nil </span><span class="cov0" title="0">{
+                logger.Error("invalid configuration", clog.Err(err))
+                return nil, fmt.Errorf("invalid configuration: %w", err)
+        }</span>
+
+        // 2. 创建内部 etcd 客户端
+        <span class="cov5" title="3">clientCfg := client.Config{
+                Endpoints: config.Endpoints,
+                Username:  config.Username,
+                Password:  config.Password,
+                Timeout:   config.DialTimeout,
+                Logger:    logger.With(clog.String("component", "etcd-client")),
+        }
+        etcdClient, err := client.New(clientCfg)
+        if err != nil </span><span class="cov0" title="0">{
+                logger.Error("failed to create etcd client", clog.Err(err))
+                return nil, err
+        }</span>
+
+        // 3. 创建内部服务
+        <span class="cov5" title="3">lockService := lockimpl.NewEtcdLockFactory(etcdClient, "/locks", logger.With(clog.String("component", "lock")))
+        registryService := registryimpl.NewEtcdServiceRegistry(etcdClient, "/services", logger.With(clog.String("component", "registry")))
+        configService := configimpl.NewEtcdConfigCenter(etcdClient, "/config", logger.With(clog.String("component", "config")))
+
+        // 4. 组装 coordinator
+        coord := &amp;coordinator{
+                client:     etcdClient,
+                lock:       lockService,
+                registry:   registryService,
+                config:     configService,
+                logger:     logger,
+                closed:     false,
+                allocators: make(map[string]allocator.InstanceIDAllocator),
+        }
+
+        logger.Info("coordinator created successfully")
+        return coord, nil</span>
+}
+
+// Lock 实现 Provider 接口 - 获取分布式锁服务
+func (c *coordinator) Lock() lock.DistributedLock <span class="cov0" title="0">{
+        c.mu.RLock()
+        defer c.mu.RUnlock()
+        return c.lock
+}</span>
+
+// Registry 实现 Provider 接口 - 获取服务注册发现服务
+func (c *coordinator) Registry() registry.ServiceRegistry <span class="cov0" title="0">{
+        c.mu.RLock()
+        defer c.mu.RUnlock()
+        return c.registry
+}</span>
+
+// Config 实现 Provider 接口 - 获取配置中心服务
+func (c *coordinator) Config() config.ConfigCenter <span class="cov0" title="0">{
+        c.mu.RLock()
+        defer c.mu.RUnlock()
+        return c.config
+}</span>
+
+// InstanceIDAllocator 实现 Provider 接口 - 获取服务实例ID分配器
+// 此方法是可重入的：为同一个 serviceName 多次调用，将返回同一个共享的分配器实例
+func (c *coordinator) InstanceIDAllocator(serviceName string, maxID int) (allocator.InstanceIDAllocator, error) <span class="cov0" title="0">{
+        c.allocatorsMu.RLock()
+
+        // 生成缓存键
+        cacheKey := fmt.Sprintf("%s:%d", serviceName, maxID)
+
+        // 检查是否已存在
+        if allocator, exists := c.allocators[cacheKey]; exists </span><span class="cov0" title="0">{
+                c.allocatorsMu.RUnlock()
+                return allocator, nil
+        }</span>
+        <span class="cov0" title="0">c.allocatorsMu.RUnlock()
+
+        // 创建新的分配器
+        c.allocatorsMu.Lock()
+        defer c.allocatorsMu.Unlock()
+
+        // 再次检查，防止并发创建
+        if allocator, exists := c.allocators[cacheKey]; exists </span><span class="cov0" title="0">{
+                return allocator, nil
+        }</span>
+
+        // 获取 etcd 原始客户端
+        <span class="cov0" title="0">etcdClient := c.client.Client()
+
+        // 创建分配器
+        allocator, err := allocatorimpl.NewEtcdInstanceIDAllocator(
+                etcdClient,
+                serviceName,
+                maxID,
+                c.logger.With(clog.String("service", serviceName)),
+        )
+        if err != nil </span><span class="cov0" title="0">{
+                return nil, fmt.Errorf("failed to create instance ID allocator: %w", err)
+        }</span>
+
+        // 缓存分配器
+        <span class="cov0" title="0">c.allocators[cacheKey] = allocator
+
+        c.logger.Info("instance ID allocator created",
+                clog.String("service", serviceName),
+                clog.Int("max_id", maxID))
+
+        return allocator, nil</span>
+}
+
+// Close 实现 Provider 接口 - 关闭协调器并释放资源
+func (c *coordinator) Close() error <span class="cov5" title="3">{
+        c.mu.Lock()
+        defer c.mu.Unlock()
+
+        if c.closed </span><span class="cov0" title="0">{
+                return nil
+        }</span>
+
+        <span class="cov5" title="3">c.logger.Info("closing coordinator")
+
+        // 关闭所有分配器
+        c.allocatorsMu.Lock()
+        for key, allocator := range c.allocators </span><span class="cov0" title="0">{
+                if closer, ok := allocator.(interface{ Close() error }); ok </span><span class="cov0" title="0">{
+                        if err := closer.Close(); err != nil </span><span class="cov0" title="0">{
+                                c.logger.Error("failed to close allocator", clog.String("key", key), clog.Err(err))
+                        }</span>
+                }
+                <span class="cov0" title="0">delete(c.allocators, key)</span>
+        }
+        <span class="cov5" title="3">c.allocatorsMu.Unlock()
+
+        // 关闭 etcd 客户端
+        if c.client != nil </span><span class="cov5" title="3">{
+                if err := c.client.Close(); err != nil </span><span class="cov0" title="0">{
+                        c.logger.Error("failed to close etcd client", clog.Err(err))
+                        return err
+                }</span>
+        }
+
+        <span class="cov5" title="3">c.closed = true
+        c.logger.Info("coordinator closed successfully")
+        return nil</span>
+}
+
+// Health 实现 Provider 接口 - 检查协调器及其所有服务的健康状态
+func (c *coordinator) Health(ctx context.Context) error <span class="cov5" title="3">{
+        c.mu.RLock()
+        defer c.mu.RUnlock()
+
+        if c.closed </span><span class="cov1" title="1">{
+                return fmt.Errorf("coordinator is closed")
+        }</span>
+
+        // 检查 etcd 客户端连接
+        <span class="cov3" title="2">if c.client == nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("etcd client is nil")
+        }</span>
+
+        // 检查 etcd 连通性
+        <span class="cov3" title="2">if err := c.client.Ping(ctx); err != nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("etcd ping failed: %w", err)
+        }</span>
+
+        // 检查分布式锁服务
+        <span class="cov3" title="2">if c.lock == nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("lock service is nil")
+        }</span>
+
+        // 检查服务注册发现服务
+        <span class="cov3" title="2">if c.registry == nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("registry service is nil")
+        }</span>
+
+        // 检查配置中心服务
+        <span class="cov3" title="2">if c.config == nil </span><span class="cov0" title="0">{
+                return fmt.Errorf("config service is nil")
+        }</span>
+
+        // 检查所有缓存的分配器
+        <span class="cov3" title="2">c.allocatorsMu.RLock()
+        for key, allocator := range c.allocators </span><span class="cov0" title="0">{
+                if healthChecker, ok := allocator.(interface{ Health(context.Context) error }); ok </span><span class="cov0" title="0">{
+                        if err := healthChecker.Health(ctx); err != nil </span><span class="cov0" title="0">{
+                                c.logger.Warn("allocator health check failed",
+                                        clog.String("key", key),
+                                        clog.Err(err))
+                                // 不返回错误，因为单个分配器失败不应该影响整体健康状态
+                        }</span>
+                }
+        }
+        <span class="cov3" title="2">c.allocatorsMu.RUnlock()
+
+        c.logger.Debug("coordinator health check passed")
+        return nil</span>
+}
+
+// validateConfig 验证协调器配置
+func validateConfig(config *Config) error <span class="cov10" title="9">{
+        if config == nil </span><span class="cov1" title="1">{
+                return fmt.Errorf("config cannot be nil")
+        }</span>
+
+        <span class="cov9" title="8">if len(config.Endpoints) == 0 </span><span class="cov1" title="1">{
+                return fmt.Errorf("at least one endpoint must be specified")
+        }</span>
+
+        <span class="cov8" title="7">for i, endpoint := range config.Endpoints </span><span class="cov9" title="8">{
+                if endpoint == "" </span><span class="cov1" title="1">{
+                        return fmt.Errorf("endpoint %d cannot be empty", i)
+                }</span>
+        }
+
+        <span class="cov8" title="6">if config.DialTimeout &lt;= 0 </span><span class="cov3" title="2">{
+                return fmt.Errorf("dial timeout must be positive")
+        }</span>
+
+        <span class="cov6" title="4">return nil</span>
+}
+</pre>
+		
+		<pre class="file" id="file2" style="display: none">package coord
+
+import "github.com/ceyewan/infra-kit/clog"
+
+// Options holds configuration for the coordinator.
+type Options struct {
+        Logger    clog.Logger
+        Namespace string
+}
+
+// Option configures a coordinator.
+type Option func(*Options)
+
+// WithLogger provides a logger for the coordinator.
+func WithLogger(logger clog.Logger) Option <span class="cov10" title="3">{
+        return func(o *Options) </span><span class="cov10" title="3">{
+                o.Logger = logger
+        }</span>
+}
+
+// WithNamespace sets the namespace for the coordinator.
+func WithNamespace(namespace string) Option <span class="cov0" title="0">{
+        return func(o *Options) </span><span class="cov0" title="0">{
+                o.Namespace = namespace
+        }</span>
+}
+
+// DefaultOptions returns default options for coordinator.
+func DefaultOptions() *Options <span class="cov0" title="0">{
+        return &amp;Options{
+                Logger:    clog.Namespace("coord"),
+                Namespace: "coord",
+        }
+}</span>
+</pre>
+		
+		</div>
+	</body>
+	<script>
+	(function() {
+		var files = document.getElementById('files');
+		var visible;
+		files.addEventListener('change', onChange, false);
+		function select(part) {
+			if (visible)
+				visible.style.display = 'none';
+			visible = document.getElementById(part);
+			if (!visible)
+				return;
+			files.value = part;
+			visible.style.display = 'block';
+			location.hash = part;
+		}
+		function onChange() {
+			select(files.value);
+			window.scrollTo(0, 0);
+		}
+		if (location.hash != "") {
+			select(location.hash.substr(1));
+		}
+		if (!visible) {
+			select("file0");
+		}
+	})();
+	</script>
+</html>

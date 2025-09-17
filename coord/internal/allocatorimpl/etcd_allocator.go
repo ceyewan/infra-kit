@@ -56,6 +56,20 @@ var _ allocator.AllocatedID = (*allocatedID)(nil)
 
 // NewEtcdInstanceIDAllocator 创建新的实例 ID 分配器
 func NewEtcdInstanceIDAllocator(client *clientv3.Client, serviceName string, maxID int, logger clog.Logger) (allocator.InstanceIDAllocator, error) {
+	// 参数验证
+	if client == nil {
+		return nil, fmt.Errorf("[VALIDATION_ERROR] client cannot be nil")
+	}
+	if serviceName == "" {
+		return nil, fmt.Errorf("[VALIDATION_ERROR] service name cannot be empty")
+	}
+	if maxID <= 0 {
+		return nil, fmt.Errorf("[VALIDATION_ERROR] max ID must be positive")
+	}
+	if logger == nil {
+		return nil, fmt.Errorf("[VALIDATION_ERROR] logger cannot be nil")
+	}
+
 	allocator := &etcdInstanceIDAllocator{
 		client:       client,
 		serviceName:  serviceName,
@@ -83,6 +97,11 @@ func (a *etcdInstanceIDAllocator) initSession() error {
 		return nil
 	}
 
+	// 检查分配器是否已关闭
+	if a.closed {
+		return errAllocatorClosed
+	}
+
 	// 创建会话
 	session, err := concurrency.NewSession(a.client, concurrency.WithTTL(int(defaultLeaseTTL/time.Second)))
 	if err != nil {
@@ -92,7 +111,16 @@ func (a *etcdInstanceIDAllocator) initSession() error {
 	a.session = session
 	a.leaseID = session.Lease()
 
-	// 启动会话保活
+	// 启动会话保活（只在第一次初始化时启动）
+	if a.done != nil {
+		select {
+		case <-a.done:
+			// 通道已关闭，重新创建
+			a.done = make(chan struct{})
+		default:
+			// 通道未关闭，说明已经有goroutine在运行
+		}
+	}
 	go a.keepSessionAlive()
 
 	a.logger.Info("allocator session initialized", clog.Int64("lease_id", int64(a.leaseID)))
@@ -331,4 +359,38 @@ func (a *etcdInstanceIDAllocator) IsIDAllocated(ctx context.Context, id int) (bo
 	}
 
 	return len(resp.Kvs) > 0, nil
+}
+
+// Health 健康检查
+func (a *etcdInstanceIDAllocator) Health(ctx context.Context) error {
+	a.sessionMu.RLock()
+	defer a.sessionMu.RUnlock()
+
+	if a.closed {
+		return fmt.Errorf("[HEALTH_CHECK_FAILED] allocator is closed")
+	}
+
+	if a.session == nil {
+		return fmt.Errorf("[HEALTH_CHECK_FAILED] session is not initialized")
+	}
+
+	// 检查会话是否仍然活跃
+	select {
+	case <-a.session.Done():
+		return fmt.Errorf("[HEALTH_CHECK_FAILED] session has expired")
+	default:
+	}
+
+	// 检查etcd连接是否正常
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	// 尝试获取一个简单的键来验证连接
+	healthKey := fmt.Sprintf("%s/health", a.basePath)
+	_, err := a.client.Get(ctx, healthKey)
+	if err != nil {
+		return fmt.Errorf("[HEALTH_CHECK_FAILED] etcd connection failed: %w", err)
+	}
+
+	return nil
 }

@@ -28,6 +28,8 @@ type Provider interface {
 	// InstanceIDAllocator 获取一个服务实例ID分配器
 	// 此方法是可重入的：为同一个 serviceName 多次调用，将返回同一个共享的分配器实例
 	InstanceIDAllocator(serviceName string, maxID int) (allocator.InstanceIDAllocator, error)
+	// Health 检查协调器及其所有服务的健康状态
+	Health(ctx context.Context) error
 	// Close 关闭协调器并释放资源
 	Close() error
 }
@@ -62,6 +64,12 @@ func New(ctx context.Context, config *Config, opts ...Option) (Provider, error) 
 
 	logger.Info("creating new coordinator",
 		clog.Strings("endpoints", config.Endpoints))
+
+	// 1. 验证配置
+	if err := validateConfig(config); err != nil {
+		logger.Error("invalid configuration", clog.Err(err))
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
 
 	// 2. 创建内部 etcd 客户端
 	clientCfg := client.Config{
@@ -199,5 +207,80 @@ func (c *coordinator) Close() error {
 
 	c.closed = true
 	c.logger.Info("coordinator closed successfully")
+	return nil
+}
+
+// Health 实现 Provider 接口 - 检查协调器及其所有服务的健康状态
+func (c *coordinator) Health(ctx context.Context) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.closed {
+		return fmt.Errorf("coordinator is closed")
+	}
+
+	// 检查 etcd 客户端连接
+	if c.client == nil {
+		return fmt.Errorf("etcd client is nil")
+	}
+
+	// 检查 etcd 连通性
+	if err := c.client.Ping(ctx); err != nil {
+		return fmt.Errorf("etcd ping failed: %w", err)
+	}
+
+	// 检查分布式锁服务
+	if c.lock == nil {
+		return fmt.Errorf("lock service is nil")
+	}
+
+	// 检查服务注册发现服务
+	if c.registry == nil {
+		return fmt.Errorf("registry service is nil")
+	}
+
+	// 检查配置中心服务
+	if c.config == nil {
+		return fmt.Errorf("config service is nil")
+	}
+
+	// 检查所有缓存的分配器
+	c.allocatorsMu.RLock()
+	for key, allocator := range c.allocators {
+		if healthChecker, ok := allocator.(interface{ Health(context.Context) error }); ok {
+			if err := healthChecker.Health(ctx); err != nil {
+				c.logger.Warn("allocator health check failed",
+					clog.String("key", key),
+					clog.Err(err))
+				// 不返回错误，因为单个分配器失败不应该影响整体健康状态
+			}
+		}
+	}
+	c.allocatorsMu.RUnlock()
+
+	c.logger.Debug("coordinator health check passed")
+	return nil
+}
+
+// validateConfig 验证协调器配置
+func validateConfig(config *Config) error {
+	if config == nil {
+		return fmt.Errorf("config cannot be nil")
+	}
+
+	if len(config.Endpoints) == 0 {
+		return fmt.Errorf("at least one endpoint must be specified")
+	}
+
+	for i, endpoint := range config.Endpoints {
+		if endpoint == "" {
+			return fmt.Errorf("endpoint %d cannot be empty", i)
+		}
+	}
+
+	if config.DialTimeout <= 0 {
+		return fmt.Errorf("dial timeout must be positive")
+	}
+
 	return nil
 }

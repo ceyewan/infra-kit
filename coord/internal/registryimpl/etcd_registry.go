@@ -114,11 +114,17 @@ func (r *EtcdServiceRegistry) Register(ctx context.Context, service registry.Ser
 		<-session.Done()
 		// 使用非阻塞的方式记录日志，避免死锁
 		// 在高并发情况下，如果日志写入有问题，不应该阻塞核心逻辑
-		go func() {
+		logCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		select {
+		case <-logCtx.Done():
+			// 日志记录超时，放弃记录
+		default:
 			r.logger.Warn("服务会话已过期或关闭",
 				clog.String("service_name", service.Name),
 				clog.String("service_id", service.ID))
-		}()
+		}
 	}()
 
 	return nil
@@ -203,19 +209,30 @@ func (r *EtcdServiceRegistry) Watch(ctx context.Context, serviceName string) (<-
 
 	go func() {
 		defer close(eventCh)
-		for resp := range etcdWatchCh {
-			if err := resp.Err(); err != nil {
-				r.logger.Error("监听服务发生错误", clog.String("service_name", serviceName), clog.Err(err))
-				// 可选：向通道发送错误事件
+		defer r.logger.Info("service watch goroutine exiting", clog.String("service_name", serviceName))
+
+		for {
+			select {
+			case <-ctx.Done():
+				r.logger.Info("service watch context cancelled", clog.String("service_name", serviceName))
 				return
-			}
-			for _, event := range resp.Events {
-				serviceEvent := r.convertEvent(event)
-				if serviceEvent != nil {
-					select {
-					case eventCh <- *serviceEvent:
-					case <-ctx.Done():
-						return
+			case resp, ok := <-etcdWatchCh:
+				if !ok {
+					r.logger.Info("etcd watch channel closed", clog.String("service_name", serviceName))
+					return
+				}
+				if err := resp.Err(); err != nil {
+					r.logger.Error("监听服务发生错误", clog.String("service_name", serviceName), clog.Err(err))
+					return
+				}
+				for _, event := range resp.Events {
+					serviceEvent := r.convertEvent(event)
+					if serviceEvent != nil {
+						select {
+						case eventCh <- *serviceEvent:
+						case <-ctx.Done():
+							return
+						}
 					}
 				}
 			}

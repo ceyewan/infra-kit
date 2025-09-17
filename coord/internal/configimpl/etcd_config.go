@@ -218,18 +218,30 @@ func (c *EtcdConfigCenter) watch(ctx context.Context, keyOrPrefix string, v inte
 
 	go func() {
 		defer close(eventCh)
-		for resp := range etcdWatchCh {
-			if err := resp.Err(); err != nil {
-				c.logger.Error("Watcher error", clog.String("key", keyOrPrefix), clog.Err(err))
+		defer c.logger.Info("config watch goroutine exiting", clog.String("key", keyOrPrefix))
+
+		for {
+			select {
+			case <-watchCtx.Done():
+				c.logger.Info("config watch context cancelled", clog.String("key", keyOrPrefix))
 				return
-			}
-			for _, event := range resp.Events {
-				configEvent := c.convertEvent(event, valueType)
-				if configEvent != nil {
-					select {
-					case eventCh <- *configEvent:
-					case <-watchCtx.Done():
-						return
+			case resp, ok := <-etcdWatchCh:
+				if !ok {
+					c.logger.Info("etcd watch channel closed", clog.String("key", keyOrPrefix))
+					return
+				}
+				if err := resp.Err(); err != nil {
+					c.logger.Error("Watcher error", clog.String("key", keyOrPrefix), clog.Err(err))
+					return
+				}
+				for _, event := range resp.Events {
+					configEvent := c.convertEvent(event, valueType)
+					if configEvent != nil {
+						select {
+						case eventCh <- *configEvent:
+						case <-watchCtx.Done():
+							return
+						}
 					}
 				}
 			}
