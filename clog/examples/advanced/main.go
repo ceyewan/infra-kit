@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ceyewan/gochat/im-infra/clog"
+	"github.com/ceyewan/infra-kit/clog"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )

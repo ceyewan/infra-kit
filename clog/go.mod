@@ -3,7 +3,6 @@ module github.com/ceyewan/infra-kit/clog
 go 1.25.1
 
 require (
-	github.com/ceyewan/gochat v0.0.0-20250914161530-2062cf684365
 	github.com/gin-gonic/gin v1.10.1
 	github.com/google/uuid v1.6.0
 	go.uber.org/zap v1.27.0

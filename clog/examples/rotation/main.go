@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/ceyewan/gochat/im-infra/clog"
+	"github.com/ceyewan/infra-kit/clog"
 )
 
 func main() {

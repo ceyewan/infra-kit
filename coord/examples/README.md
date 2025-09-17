@@ -19,6 +19,10 @@ go run main.go
 cd distributed-lock/basic
 go run main.go
 
+# 分布式锁高级用法
+cd distributed-lock/advanced
+go run main.go
+
 # 配置中心示例
 cd config-center/basic
 go run main.go
@@ -27,8 +31,16 @@ go run main.go
 cd service-discovery/basic
 go run main.go
 
-# ID生成器示例
+# ID生成器基础示例
 cd id-generator/basic
+go run main.go
+
+# ID生成器使用模式示例
+cd id-generator/patterns
+go run main.go
+
+# ID生成器集成使用示例
+cd id-generator/integration
 go run main.go
 ```
 
@@ -249,12 +261,16 @@ for _, svc := range services {
 - ✅ 租约自动管理
 - ✅ 并发安全分配
 - ✅ ID回收机制
+- ✅ 重试机制和弹性设计
+- ✅ 监控和健康检查
+- ✅ 与其他模块的集成支持
 
 #### 适用场景
 - 微服务实例标识
 - 分布式任务分配
 - 会话管理
 - 资源标识
+- 集群节点管理
 
 #### 快速示例
 ```go
