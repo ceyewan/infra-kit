@@ -39,6 +39,63 @@ defer lock.Unlock(ctx)
 ttl, err := lock.TTL(ctx)
 fmt.Printf("锁剩余时间: %v\n", ttl)
 fmt.Printf("锁键名: %s\n", lock.Key())
+
+// 手动续约锁
+success, err := lock.Renew(ctx)
+if success {
+    fmt.Println("锁续约成功")
+}
+
+// 检查锁是否过期
+expired, err := lock.IsExpired(ctx)
+if expired {
+    fmt.Println("锁已过期")
+}
+```
+
+#### 分布式锁最佳实践
+
+```go
+// 标准使用模式
+func processWithLock(ctx context.Context, coordinator coord.Provider) error {
+    // 1. 获取锁，设置合理的 TTL
+    lock, err := coordinator.Lock().Acquire(ctx, "business-process", 30*time.Second)
+    if err != nil {
+        return fmt.Errorf("获取锁失败: %w", err)
+    }
+    defer lock.Unlock(ctx) // 确保锁被释放
+    
+    // 2. 执行业务逻辑
+    err = doBusinessLogic()
+    if err != nil {
+        return fmt.Errorf("业务逻辑执行失败: %w", err)
+    }
+    
+    // 3. 可选：手动释放锁（defer 也会处理）
+    return lock.Unlock(ctx)
+}
+
+// 带重试的锁获取
+func acquireLockWithRetry(ctx context.Context, coordinator coord.Provider, key string, ttl time.Duration, maxRetries int) (lock.Lock, error) {
+    var lastErr error
+    
+    for i := 0; i < maxRetries; i++ {
+        lock, err := coordinator.Lock().TryAcquire(ctx, key, ttl)
+        if err == nil {
+            return lock, nil
+        }
+        lastErr = err
+        
+        // 等待一段时间后重试
+        select {
+        case <-time.After(time.Duration(i+1) * 100 * time.Millisecond):
+        case <-ctx.Done():
+            return nil, ctx.Err()
+        }
+    }
+    
+    return nil, fmt.Errorf("重试 %d 次后仍无法获取锁: %w", maxRetries, lastErr)
+}
 ```
 
 ### 服务注册发现
@@ -161,7 +218,16 @@ type Lock interface {
     Unlock(ctx) error           // 释放锁
     TTL(ctx) (time.Duration, error) // 获取剩余时间
     Key() string                // 获取锁键名
+    Renew(ctx) (bool, error)   // 手动续约锁
+    IsExpired(ctx) (bool, error) // 检查锁是否过期
 }
+
+// 错误类型
+var (
+    ErrLockExpired  = errors.New("lock has expired")  // 锁已过期
+    ErrLockNotHeld  = errors.New("lock not held")    // 锁未被持有
+    ErrLockConflict = errors.New("lock conflict")    // 锁冲突
+)
 ```
 
 ### 服务注册发现
@@ -262,7 +328,10 @@ coordinator, err := coord.New(context.Background(), cfg, coord.WithLogger(logger
 - 基于 etcd 的高可靠互斥锁
 - 支持阻塞 (`Acquire`) 和非阻塞 (`TryAcquire`) 获取
 - TTL 自动续约机制
-- 完整的锁操作接口 (`Unlock`, `TTL`, `Key`)
+- 完整的锁操作接口 (`Unlock`, `TTL`, `Key`, `Renew`, `IsExpired`)
+- 统一的错误处理机制
+- 详细的操作日志记录
+- 生产级并发安全保证
 
 ### 🔍 服务注册发现
 - **gRPC 动态服务发现**：标准 resolver 插件，实时感知服务变化

@@ -88,7 +88,7 @@ func (f *EtcdLockFactory) acquire(ctx context.Context, key string, ttl time.Dura
 		clog.String("key", lockKey),
 		clog.Int64("lease", int64(session.Lease())))
 
-	return &etcdLock{
+	return &EtcdLock{
 		session: session,
 		mutex:   mutex,
 		client:  f.client,
@@ -96,8 +96,8 @@ func (f *EtcdLockFactory) acquire(ctx context.Context, key string, ttl time.Dura
 	}, nil
 }
 
-// etcdLock 表示已持有的分布式锁
-type etcdLock struct {
+// EtcdLock 表示已持有的分布式锁
+type EtcdLock struct {
 	session *concurrency.Session // etcd 会话，管理租约
 	mutex   *concurrency.Mutex   // etcd 互斥锁
 	client  *client.EtcdClient   // etcd 客户端
@@ -105,7 +105,7 @@ type etcdLock struct {
 }
 
 // Unlock 释放锁
-func (l *etcdLock) Unlock(ctx context.Context) error {
+func (l *EtcdLock) Unlock(ctx context.Context) error {
 	// 在所有操作之前缓存 key 和 lease，防止 session 关闭后无法获取
 	key := l.mutex.Key()
 	leaseID := l.session.Lease()
@@ -132,7 +132,7 @@ func (l *etcdLock) Unlock(ctx context.Context) error {
 }
 
 // TTL 返回锁租约的剩余存活时间
-func (l *etcdLock) TTL(ctx context.Context) (time.Duration, error) {
+func (l *EtcdLock) TTL(ctx context.Context) (time.Duration, error) {
 	// 通过会话获取租约 ID
 	resp, err := l.client.Client().TimeToLive(ctx, l.session.Lease())
 	if err != nil {
@@ -148,6 +148,54 @@ func (l *etcdLock) TTL(ctx context.Context) (time.Duration, error) {
 }
 
 // Key 返回锁在 etcd 中的完整键路径
-func (l *etcdLock) Key() string {
+func (l *EtcdLock) Key() string {
 	return l.mutex.Key()
+}
+
+// Renew 手动续约锁的TTL，返回是否成功
+func (l *EtcdLock) Renew(ctx context.Context) (bool, error) {
+	// 检查会话是否仍然有效
+	select {
+	case <-l.session.Done():
+		// 会话已关闭，锁已过期
+		l.logger.Warn("会话已关闭，无法续约", clog.String("key", l.mutex.Key()))
+		return false, lock.ErrLockExpired
+	default:
+		// 会话仍然有效
+	}
+
+	// 尝试续约租约 - 使用 KeepAliveOnce 进行单次续约
+	resp, err := l.client.Client().KeepAliveOnce(ctx, l.session.Lease())
+	if err != nil {
+		l.logger.Error("租约续约失败", clog.String("key", l.mutex.Key()), clog.String("error", err.Error()))
+		return false, client.NewError(client.ErrCodeConnection, "failed to renew lease", err)
+	}
+
+	if resp == nil || resp.TTL <= 0 {
+		// 租约已过期
+		return false, lock.ErrLockExpired
+	}
+
+	l.logger.Debug("租约续约成功", clog.String("key", l.mutex.Key()), clog.Int64("ttl", int64(resp.TTL)))
+	return true, nil
+}
+
+// IsExpired 检查锁是否已过期
+func (l *EtcdLock) IsExpired(ctx context.Context) (bool, error) {
+	// 首先检查会话状态
+	select {
+	case <-l.session.Done():
+		// 会话已关闭，锁已过期
+		return true, lock.ErrLockExpired
+	default:
+		// 会话仍然有效，继续检查租约
+	}
+
+	// 检查租约的TTL
+	ttl, err := l.TTL(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	return ttl <= 0, nil
 }

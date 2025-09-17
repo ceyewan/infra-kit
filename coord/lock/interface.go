@@ -2,7 +2,17 @@ package lock
 
 import (
 	"context"
+	"errors"
 	"time"
+)
+
+var (
+	// ErrLockExpired 锁已过期
+	ErrLockExpired = errors.New("lock has expired")
+	// ErrLockNotHeld 锁未被持有
+	ErrLockNotHeld = errors.New("lock not held")
+	// ErrLockConflict 锁冲突
+	ErrLockConflict = errors.New("lock conflict")
 )
 
 // DistributedLock 是分布式锁服务的接口
@@ -22,4 +32,8 @@ type Lock interface {
 	TTL(ctx context.Context) (time.Duration, error)
 	// Key 获取锁的键
 	Key() string
+	// Renew 手动续约锁的TTL，返回是否成功
+	Renew(ctx context.Context) (bool, error)
+	// IsExpired 检查锁是否已过期
+	IsExpired(ctx context.Context) (bool, error)
 }
